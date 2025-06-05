@@ -1,0 +1,8 @@
+fastapi 
+uvicorn 
+boto3 
+pydantic
+requests
+ldap3
+sqlalchemy
+sqlalchemy.orm

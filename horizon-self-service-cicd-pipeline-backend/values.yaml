@@ -1,0 +1,56 @@
+#fullnameOverride: horizon-self-service-cicd-pipeline-backend
+namespaceOverride: horizon-relevance-dev
+replicaCount: 1
+
+image:
+  repository: ankur1825/horizon-self-service-cicd-pipeline-backend
+  tag: "1.4.3"
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 8000
+
+serviceAccount:
+  create: false
+  name: ""   
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    nginx.ingress.kubernetes.io/use-regex: "true"
+  hosts:
+    - host: horizonrelevance.com
+      paths:
+        - path: /pipeline/api(/|$)(.*)
+          pathType: ImplementationSpecific
+  # tls:
+  #   - secretName: ohatreact-tls
+  #     hosts:
+  #       - ohhdevops.cernerasp.com
+
+#envFromSecret:
+#  name: horizon-self-service-cicd-pipeline-backend 
+
+jenkins:
+  user: ankur.kashyap
+  token: 11335ca26a6deae2347005c9fa42f3bf7f
+  #user: sg1917459
+  #token: 113232cbe431bdfa47ef491bbb07c5b93c        
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+persistence:
+  enabled: true
+  storageClass: gp2
+  accessMode: ReadWriteOnce
+  size: 10Gi  
+  mountPath: /app/data  # where SQLite DB will be saved

@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Chart.Name }}
+  namespace: {{ .Values.namespaceOverride }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ .Chart.Name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Chart.Name }}
+    spec:
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: 8000
+          env:
+            - name: DB_PATH
+              value: /app/data
+            - name: JENKINS_URL
+              value: "https://horizonrelevance.com/jenkins"
+            - name: JENKINS_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Chart.Name }}
+                  key: JENKINS_USER
+            - name: JENKINS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Chart.Name }}
+                  key: JENKINS_TOKEN
+            # - name: REQUESTS_CA_BUNDLE
+            #   value: "/certs/jenkins-ca.pem"   # Path inside container
+            - name: LDAP_MANAGER_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: jenkins-ldap
+                  key: password  
+            - name: GITHUB_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: github-webhook-secret
+                  key: GITHUB_WEBHOOK_SECRET      
+          volumeMounts:
+            - name: app-data
+              mountPath: {{ .Values.persistence.mountPath }}
+      volumes:
+        - name: app-data
+          persistentVolumeClaim:
+            claimName: {{ include "horizon-self-service-cicd-pipeline-backend.fullname" . }}-pvc
