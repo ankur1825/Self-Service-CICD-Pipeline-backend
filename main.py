@@ -98,6 +98,9 @@ class OPARiskModel(BaseModel):
     violation: str
     severity: str
     risk_score: float
+    package_name: Optional[str] = "OPA Policy"       
+    installed_version: Optional[str] = "N/A"  
+    source: Optional[str] = "OPA"    
     description: Optional[str] = ""
     remediation: Optional[str] = ""
     jenkins_job: Optional[str] = None
@@ -441,14 +444,14 @@ async def upload_opa_risks(payload: OPARiskUpload, db: Session = Depends(get_db)
             vuln = Vulnerability(
                 application_id=app_entry.id,
                 target=risk.target,
-                package_name="OPA Policy",
-                installed_version="N/A",
+                package_name=risk.package_name or "OPA Policy",
+                installed_version=risk.installed_version or "N/A",
                 vulnerability_id=risk.violation.strip(),
                 severity=risk.severity.strip().upper(),
                 fixed_version=risk.remediation or "Review policy",
                 risk_score=risk.risk_score,
                 description=risk.description or risk.violation,
-                source="OPA-Kubernetes",
+                source=risk.source or "OPA", 
                 jenkins_job=risk.jenkins_job,
                 build_number=risk.build_number,
                 jenkins_url=risk.jenkins_url,

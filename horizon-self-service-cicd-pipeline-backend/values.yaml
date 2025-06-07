@@ -4,7 +4,7 @@ replicaCount: 1
 
 image:
   repository: ankur1825/horizon-self-service-cicd-pipeline-backend
-  tag: "1.4.3"
+  tag: "1.4.4"
   pullPolicy: IfNotPresent
 
 service:
