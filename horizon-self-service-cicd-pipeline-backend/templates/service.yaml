@@ -1,11 +1,11 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ .Chart.Name }}
+  name: {{ include "horizon-self-service-cicd-pipeline-backend.fullname" . }}
   namespace: {{ .Values.namespaceOverride }}
 spec:
   selector:
-    app: {{ .Chart.Name }}
+    app: {{ include "horizon-self-service-cicd-pipeline-backend.fullname" . }}
   ports:
     - port: {{.Values.service.port}}
       targetPort: 8000

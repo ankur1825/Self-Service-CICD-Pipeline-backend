@@ -2,7 +2,7 @@
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: {{ .Chart.Name }}
+  name: {{ include "horizon-self-service-cicd-pipeline-backend.fullname" . }}
   namespace: {{ .Values.namespaceOverride }}
   annotations:
     nginx.ingress.kubernetes.io/rewrite-target: /$2

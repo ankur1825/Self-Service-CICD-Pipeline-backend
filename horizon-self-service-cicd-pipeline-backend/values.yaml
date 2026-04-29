@@ -4,12 +4,24 @@ replicaCount: 1
 
 image:
   repository: ankur1825/horizon-self-service-cicd-pipeline-backend
-  tag: "1.4.4"
+  tag: "1.4.10"
   pullPolicy: IfNotPresent
 
 service:
   type: ClusterIP
   port: 8000
+
+ldap:
+  server: "ldap://openldap.horizon-relevance-dev.svc.cluster.local:389"
+  bindDN: "cn=admin,dc=horizonrelevance,dc=local"
+  baseDN: "ou=users,dc=horizonrelevance,dc=local"
+  searchFilter: "(objectClass=inetOrgPerson)"
+  uidAttribute: "uid"
+  displayNameAttribute: "displayName"
+  mailAttribute: "mail"
+  managerPasswordSecret:
+    name: jenkins-ldap
+    key: password
 
 serviceAccount:
   create: false
@@ -40,6 +52,24 @@ jenkins:
   #user: sg1917459
   #token: 113232cbe431bdfa47ef491bbb07c5b93c        
 
+enterprise:
+  licenseEnforcementEnabled: false
+  clientId: horizon-internal
+  clientName: "Horizon Relevance Internal"
+  licenseKey: internal-dev-license
+  licenseType: internal
+  licenseExpiresAt: "2099-12-31T23:59:59Z"
+  enabledPipelines: "Devops Pipeline,Test Devops Pipeline,Prod Devops Pipeline"
+  enabledFeatures: "build,artifact_publish,code_scan,image_scan,policy_validation,static_application_security,test_suites,notifications,prod_deploy,ai_remediation"
+  allowedEnvironments: "EKS-NONPROD,EKS-PROD"
+  maxRepos: "999999"
+  maxBuildsPerMonth: "999999"
+  maxUsers: "999999"
+  licenseFile: ""
+  signingSecret:
+    existingSecret: ""
+    key: ENTERPRISE_LICENSE_SIGNING_SECRET
+
 resources:
   requests:
     cpu: 100m
@@ -50,7 +80,7 @@ resources:
 
 persistence:
   enabled: true
-  storageClass: gp2
+  storageClass: gp3
   accessMode: ReadWriteOnce
   size: 10Gi  
   mountPath: /app/data  # where SQLite DB will be saved

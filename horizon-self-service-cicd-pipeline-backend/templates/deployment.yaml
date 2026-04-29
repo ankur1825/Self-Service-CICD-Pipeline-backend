@@ -1,20 +1,20 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ .Chart.Name }}
+  name: {{ include "horizon-self-service-cicd-pipeline-backend.fullname" . }}
   namespace: {{ .Values.namespaceOverride }}
 spec:
   replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:
-      app: {{ .Chart.Name }}
+      app: {{ include "horizon-self-service-cicd-pipeline-backend.fullname" . }}
   template:
     metadata:
       labels:
-        app: {{ .Chart.Name }}
+        app: {{ include "horizon-self-service-cicd-pipeline-backend.fullname" . }}
     spec:
       containers:
-        - name: {{ .Chart.Name }}
+        - name: {{ include "horizon-self-service-cicd-pipeline-backend.fullname" . }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
@@ -23,7 +23,7 @@ spec:
             - name: DB_PATH
               value: /app/data
             - name: JENKINS_URL
-              value: "https://horizonrelevance.com/jenkins"
+              value: {{ .Values.jenkins.url | default "https://horizonrelevance.com/jenkins" | quote }}
             - name: JENKINS_USER
               valueFrom:
                 secretKeyRef:
@@ -39,13 +39,60 @@ spec:
             - name: LDAP_MANAGER_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: jenkins-ldap
-                  key: password  
+                  name: {{ .Values.ldap.managerPasswordSecret.name | quote }}
+                  key: {{ .Values.ldap.managerPasswordSecret.key | quote }}
+            - name: LDAP_SERVER
+              value: {{ .Values.ldap.server | quote }}
+            - name: LDAP_USER
+              value: {{ .Values.ldap.bindDN | quote }}
+            - name: LDAP_BASE_DN
+              value: {{ .Values.ldap.baseDN | quote }}
+            - name: LDAP_SEARCH_FILTER
+              value: {{ .Values.ldap.searchFilter | quote }}
+            - name: LDAP_UID_ATTRIBUTE
+              value: {{ .Values.ldap.uidAttribute | quote }}
+            - name: LDAP_DISPLAY_NAME_ATTRIBUTE
+              value: {{ .Values.ldap.displayNameAttribute | quote }}
+            - name: LDAP_MAIL_ATTRIBUTE
+              value: {{ .Values.ldap.mailAttribute | quote }}
             - name: GITHUB_WEBHOOK_SECRET
               valueFrom:
                 secretKeyRef:
                   name: github-webhook-secret
-                  key: GITHUB_WEBHOOK_SECRET      
+                  key: GITHUB_WEBHOOK_SECRET
+            - name: ENTERPRISE_LICENSE_ENFORCEMENT_ENABLED
+              value: {{ .Values.enterprise.licenseEnforcementEnabled | quote }}
+            - name: ENTERPRISE_CLIENT_ID
+              value: {{ .Values.enterprise.clientId | quote }}
+            - name: ENTERPRISE_CLIENT_NAME
+              value: {{ .Values.enterprise.clientName | quote }}
+            - name: ENTERPRISE_LICENSE_KEY
+              value: {{ .Values.enterprise.licenseKey | quote }}
+            - name: ENTERPRISE_LICENSE_TYPE
+              value: {{ .Values.enterprise.licenseType | quote }}
+            - name: ENTERPRISE_LICENSE_EXPIRES_AT
+              value: {{ .Values.enterprise.licenseExpiresAt | quote }}
+            - name: ENTERPRISE_ENABLED_PIPELINES
+              value: {{ .Values.enterprise.enabledPipelines | quote }}
+            - name: ENTERPRISE_ENABLED_FEATURES
+              value: {{ .Values.enterprise.enabledFeatures | quote }}
+            - name: ENTERPRISE_ALLOWED_ENVIRONMENTS
+              value: {{ .Values.enterprise.allowedEnvironments | quote }}
+            - name: ENTERPRISE_MAX_REPOS
+              value: {{ .Values.enterprise.maxRepos | quote }}
+            - name: ENTERPRISE_MAX_BUILDS_PER_MONTH
+              value: {{ .Values.enterprise.maxBuildsPerMonth | quote }}
+            - name: ENTERPRISE_MAX_USERS
+              value: {{ .Values.enterprise.maxUsers | quote }}
+            - name: ENTERPRISE_LICENSE_FILE
+              value: {{ .Values.enterprise.licenseFile | quote }}
+            {{- if .Values.enterprise.signingSecret.existingSecret }}
+            - name: ENTERPRISE_LICENSE_SIGNING_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.enterprise.signingSecret.existingSecret | quote }}
+                  key: {{ .Values.enterprise.signingSecret.key | quote }}
+            {{- end }}
           volumeMounts:
             - name: app-data
               mountPath: {{ .Values.persistence.mountPath }}

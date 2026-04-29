@@ -12,9 +12,17 @@ import logging
 import json
 import hmac
 import hashlib
+from html import escape
 
 from database import SessionLocal, engine, Base
 from models import Application, ApplicationUserAccess, Vulnerability
+from enterprise.licensing import (
+    LicenseValidationError,
+    default_license_from_env,
+    license_summary,
+    merge_request_license,
+    validate_license,
+)
 
 DATABASE_PATH = "/app/data/app.db"  # This path must match your Helm `mountPath`
 
@@ -27,7 +35,7 @@ app = FastAPI(root_path="/pipeline/api")
 Base.metadata.create_all(bind=engine)
 
 # Jenkins configuration
-JENKINS_URL = "https://horizonrelevance.com/jenkins"
+JENKINS_URL = os.getenv("JENKINS_URL", "https://horizonrelevance.com/jenkins")
 JENKINS_USER = os.getenv("JENKINS_USER")
 JENKINS_TOKEN = os.getenv("JENKINS_TOKEN")
 
@@ -35,11 +43,14 @@ JENKINS_TOKEN = os.getenv("JENKINS_TOKEN")
 GITHUB_WEBHOOK_SECRET = os.environ["GITHUB_WEBHOOK_SECRET"]
 
 # LDAP configuration
-LDAP_SERVER = "ldaps://ldap.jumpcloud.com:636"
-LDAP_USER = "uid=ankur.kashyap,ou=Users,o=6817d9a0d50cd4b1b5b81ba7,dc=jumpcloud,dc=com"
+LDAP_SERVER = os.getenv("LDAP_SERVER", "ldap://openldap.horizon-relevance-dev.svc.cluster.local:389")
+LDAP_USER = os.getenv("LDAP_USER", "cn=admin,dc=horizonrelevance,dc=local")
 LDAP_PASSWORD = os.getenv("LDAP_MANAGER_PASSWORD")
-LDAP_BASE_DN = "ou=Users,o=6817d9a0d50cd4b1b5b81ba7,dc=jumpcloud,dc=com"
-SEARCH_FILTER = "(objectClass=person)"
+LDAP_BASE_DN = os.getenv("LDAP_BASE_DN", "ou=users,dc=horizonrelevance,dc=local")
+SEARCH_FILTER = os.getenv("LDAP_SEARCH_FILTER", "(objectClass=inetOrgPerson)")
+LDAP_UID_ATTRIBUTE = os.getenv("LDAP_UID_ATTRIBUTE", "uid")
+LDAP_DISPLAY_NAME_ATTRIBUTE = os.getenv("LDAP_DISPLAY_NAME_ATTRIBUTE", "displayName")
+LDAP_MAIL_ATTRIBUTE = os.getenv("LDAP_MAIL_ATTRIBUTE", "mail")
 
 # CORS setup for frontend
 app.add_middleware(
@@ -67,6 +78,54 @@ class PipelineRequest(BaseModel):
     ENABLE_OPA: bool
     ENABLE_TRIVY: bool
     requestedBy: str
+
+class DevopsPipelineRequest(BaseModel):
+    requestedBy: str
+    client_id: Optional[str] = None
+    client_name: Optional[str] = None
+    license_key: Optional[str] = None
+    license_signature: Optional[str] = None
+    license_expires_at: Optional[str] = None
+    license_type: Optional[str] = None
+    enabled_pipelines: Optional[List[str]] = None
+    enabled_features: Optional[List[str]] = None
+    allowed_environments: Optional[List[str]] = None
+    project_name: str
+    project_type: str
+    repo_type: str
+    repo_url: str
+    branch: str = "main"
+    ENABLE_SONARQUBE: bool = True
+    ENABLE_CHECKMARX: bool = False
+    checkmarx_team: Optional[str] = None
+    ENABLE_SOAPUI: bool = False
+    ENABLE_JMETER: bool = False
+    ENABLE_SELENIUM: bool = False
+    ENABLE_NEWMAN: bool = False
+    ENABLE_TRIVY: bool = False
+    target_env: str = "EKS-NONPROD"
+    notify_email: Optional[str] = None
+    aws_region: str = "us-east-1"
+    ecr_registry: str
+    ecr_repository: str
+    artifact_bucket: str
+    client_aws_role_arn: Optional[str] = None
+    enable_notifications: bool = False
+    sns_topic_arn: Optional[str] = None
+
+class LicenseValidationRequest(BaseModel):
+    client_id: Optional[str] = None
+    client_name: Optional[str] = None
+    license_key: Optional[str] = None
+    license_signature: Optional[str] = None
+    license_expires_at: Optional[str] = None
+    license_type: Optional[str] = None
+    enabled_pipelines: Optional[List[str]] = None
+    enabled_features: Optional[List[str]] = None
+    allowed_environments: Optional[List[str]] = None
+    pipeline_name: str = "Devops Pipeline"
+    target_env: str = "EKS-NONPROD"
+    requested_features: List[str] = []
 
 class TriggerRequest(BaseModel):
     project_name: str
@@ -131,6 +190,53 @@ class GrantAccessRequest(BaseModel):
     user_email: str
     application: str    
 
+def requested_devops_features(request: DevopsPipelineRequest) -> List[str]:
+    features = ["build", "artifact_publish"]
+    if request.ENABLE_SONARQUBE:
+        features.append("code_scan")
+    if request.ENABLE_TRIVY:
+        features.append("image_scan")
+    if request.ENABLE_CHECKMARX:
+        features.append("static_application_security")
+    if request.ENABLE_SOAPUI or request.ENABLE_JMETER or request.ENABLE_SELENIUM or request.ENABLE_NEWMAN:
+        features.append("test_suites")
+    if "PROD" in (request.target_env or "").upper():
+        features.append("prod_deploy")
+    if request.enable_notifications:
+        features.append("notifications")
+    return features
+
+@app.get("/license/status")
+def get_license_status():
+    license_doc = default_license_from_env()
+    try:
+        validated = validate_license(
+            license_doc,
+            pipeline_name="Devops Pipeline",
+            target_env="EKS-NONPROD",
+            requested_features=[],
+        )
+        return license_summary(validated)
+    except LicenseValidationError as exc:
+        license_doc["status"] = "invalid"
+        summary = license_summary(license_doc)
+        summary["error"] = str(exc)
+        return JSONResponse(status_code=403, content=summary)
+
+@app.post("/license/validate")
+def validate_enterprise_license(request: LicenseValidationRequest):
+    license_doc = merge_request_license(request.dict())
+    try:
+        validated = validate_license(
+            license_doc,
+            pipeline_name=request.pipeline_name,
+            target_env=request.target_env,
+            requested_features=request.requested_features,
+        )
+        return license_summary(validated)
+    except LicenseValidationError as exc:
+        return JSONResponse(status_code=403, content={"error": str(exc), "status": "invalid"})
+
 @app.post("/login")
 async def login(request: Request):
     body = await request.json()
@@ -143,17 +249,17 @@ async def login(request: Request):
         search_conn = Connection(server, user=LDAP_USER, password=LDAP_PASSWORD, auto_bind=True)
         search_conn.search(
             search_base=LDAP_BASE_DN,
-            search_filter=f"(uid={username})",
+            search_filter=f"({LDAP_UID_ATTRIBUTE}={username})",
             search_scope=SUBTREE,
-            attributes=["displayName", "mail", "uid"]
+            attributes=[LDAP_DISPLAY_NAME_ATTRIBUTE, LDAP_MAIL_ATTRIBUTE, LDAP_UID_ATTRIBUTE]
         )
         if not search_conn.entries:
             return JSONResponse(status_code=401, content={"error": "User not found"})
 
         user_entry = search_conn.entries[0]
         user_dn = str(user_entry.entry_dn)
-        display_name = str(user_entry.displayName)
-        email = str(user_entry.mail)
+        display_name = str(user_entry[LDAP_DISPLAY_NAME_ATTRIBUTE]) if LDAP_DISPLAY_NAME_ATTRIBUTE in user_entry else username
+        email = str(user_entry[LDAP_MAIL_ATTRIBUTE]) if LDAP_MAIL_ATTRIBUTE in user_entry else ""
         search_conn.unbind()
 
         auth_conn = Connection(server, user=user_dn, password=password, auto_bind=True)
@@ -173,15 +279,15 @@ def get_ldap_users():
             search_base=LDAP_BASE_DN,
             search_filter=SEARCH_FILTER,
             search_scope=SUBTREE,
-            attributes=["uid", "displayName", "mail"]
+            attributes=[LDAP_UID_ATTRIBUTE, LDAP_DISPLAY_NAME_ATTRIBUTE, LDAP_MAIL_ATTRIBUTE]
         )
         users = []
         seen = set()
         for entry in conn.entries:
-            uid = str(entry.uid)
-            display_name = str(entry.displayName)
-            email = str(entry.mail)
-            if uid not in seen:
+            uid = str(entry[LDAP_UID_ATTRIBUTE]) if LDAP_UID_ATTRIBUTE in entry else None
+            display_name = str(entry[LDAP_DISPLAY_NAME_ATTRIBUTE]) if LDAP_DISPLAY_NAME_ATTRIBUTE in entry else uid
+            email = str(entry[LDAP_MAIL_ATTRIBUTE]) if LDAP_MAIL_ATTRIBUTE in entry else ""
+            if uid and uid not in seen:
                 users.append({"username": uid, "fullName": display_name, "email": email})
                 seen.add(uid)
         conn.unbind()
@@ -301,6 +407,235 @@ main_template([
         "build_response_code": build_response.status_code
     }
 
+@app.post("/devops/pipeline")
+def create_devops_pipeline(request: DevopsPipelineRequest):
+    allowed_project_types = {
+        "Docker",
+        "Angular",
+        "SpringBoot",
+        "SpringBoot-Java11",
+        "NodeJs",
+        "WebComponent",
+    }
+    if request.project_type not in allowed_project_types:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "Unsupported project_type",
+                "supported_project_types": sorted(allowed_project_types),
+            },
+        )
+
+    job_name = request.project_name.strip()
+    if not job_name:
+        return JSONResponse(status_code=400, content={"error": "project_name is required"})
+
+    license_doc = merge_request_license(request.dict())
+    try:
+        validated_license = validate_license(
+            license_doc,
+            pipeline_name="Devops Pipeline",
+            target_env=request.target_env,
+            requested_features=requested_devops_features(request),
+        )
+    except LicenseValidationError as exc:
+        return JSONResponse(status_code=403, content={"error": str(exc), "status": "license_denied"})
+
+    license_summary_doc = license_summary(validated_license)
+    enabled_pipelines = ",".join(validated_license.get("enabled_pipelines") or [])
+    enabled_features = ",".join(validated_license.get("enabled_features") or [])
+    allowed_environments = ",".join(validated_license.get("allowed_environments") or [])
+
+    values = {
+        "CLIENT_ID": str(validated_license.get("client_id") or "").strip(),
+        "CLIENT_NAME": str(validated_license.get("client_name") or "").strip(),
+        "LICENSE_TYPE": str(validated_license.get("license_type") or "").strip(),
+        "LICENSE_EXPIRES_AT": str(validated_license.get("expires_at") or "").strip(),
+        "LICENSED_PIPELINES": enabled_pipelines,
+        "LICENSED_FEATURES": enabled_features,
+        "LICENSED_ENVIRONMENTS": allowed_environments,
+        "LICENSE_VALIDATION_MODE": str(validated_license.get("validation_mode") or "unknown"),
+        "PROJECT_NAME": job_name,
+        "PROJECT_TYPE": request.project_type,
+        "REPO_TYPE": request.repo_type,
+        "REPO_URL": request.repo_url.strip(),
+        "BRANCH": request.branch.strip() or "main",
+        "CREDENTIALS_ID": "github-token",
+        "PIPELINE_KIND": "DEVOPS",
+        "SERVICE_NAME": "Devops Pipeline",
+        "REQUESTED_BY": request.requestedBy,
+        "ENABLE_SONARQUBE": str(request.ENABLE_SONARQUBE).lower(),
+        "ENABLE_CHECKMARX": str(request.ENABLE_CHECKMARX).lower(),
+        "CHECKMARX_TEAM": (request.checkmarx_team or "").strip(),
+        "ENABLE_SOAPUI": str(request.ENABLE_SOAPUI).lower(),
+        "ENABLE_JMETER": str(request.ENABLE_JMETER).lower(),
+        "ENABLE_SELENIUM": str(request.ENABLE_SELENIUM).lower(),
+        "ENABLE_NEWMAN": str(request.ENABLE_NEWMAN).lower(),
+        "ENABLE_TRIVY": str(request.ENABLE_TRIVY).lower(),
+        "ENABLE_OPA": "false",
+        "TARGET_ENV": request.target_env,
+        "NOTIFY_EMAIL": (request.notify_email or "").strip(),
+        "AWS_REGION": request.aws_region.strip() or "us-east-1",
+        "ECR_REGISTRY": request.ecr_registry.strip(),
+        "ECR_REPOSITORY": request.ecr_repository.strip(),
+        "ARTIFACT_BUCKET": request.artifact_bucket.strip(),
+        "CLIENT_AWS_ROLE_ARN": (request.client_aws_role_arn or "").strip(),
+        "ENABLE_NOTIFICATIONS": str(request.enable_notifications).lower(),
+        "SNS_TOPIC_ARN": (request.sns_topic_arn or "").strip(),
+    }
+    xml_values = {k: escape(v, quote=True) for k, v in values.items()}
+
+    bool_param_names = [
+        "ENABLE_SONARQUBE",
+        "ENABLE_CHECKMARX",
+        "ENABLE_SOAPUI",
+        "ENABLE_JMETER",
+        "ENABLE_SELENIUM",
+        "ENABLE_NEWMAN",
+        "ENABLE_TRIVY",
+        "ENABLE_OPA",
+        "ENABLE_NOTIFICATIONS",
+    ]
+    string_param_names = [
+        "CLIENT_ID",
+        "CLIENT_NAME",
+        "LICENSE_TYPE",
+        "LICENSE_EXPIRES_AT",
+        "LICENSED_PIPELINES",
+        "LICENSED_FEATURES",
+        "LICENSED_ENVIRONMENTS",
+        "LICENSE_VALIDATION_MODE",
+        "PROJECT_NAME",
+        "PROJECT_TYPE",
+        "REPO_TYPE",
+        "REPO_URL",
+        "BRANCH",
+        "CREDENTIALS_ID",
+        "PIPELINE_KIND",
+        "SERVICE_NAME",
+        "REQUESTED_BY",
+        "CHECKMARX_TEAM",
+        "TARGET_ENV",
+        "NOTIFY_EMAIL",
+        "AWS_REGION",
+        "ECR_REGISTRY",
+        "ECR_REPOSITORY",
+        "ARTIFACT_BUCKET",
+        "CLIENT_AWS_ROLE_ARN",
+        "SNS_TOPIC_ARN",
+    ]
+
+    parameter_definitions = []
+    for name in string_param_names:
+        parameter_definitions.append(f"""
+        <hudson.model.StringParameterDefinition>
+          <name>{name}</name>
+          <defaultValue>{xml_values[name]}</defaultValue>
+          <description>{name}</description>
+        </hudson.model.StringParameterDefinition>""")
+    for name in bool_param_names:
+        parameter_definitions.append(f"""
+        <hudson.model.BooleanParameterDefinition>
+          <name>{name}</name>
+          <defaultValue>{xml_values[name]}</defaultValue>
+          <description>{name}</description>
+        </hudson.model.BooleanParameterDefinition>""")
+
+    job_config = f"""
+<flow-definition plugin="workflow-job">
+  <description>Devops Pipeline for {xml_values["PROJECT_NAME"]}</description>
+  <properties>
+    <hudson.model.ParametersDefinitionProperty>
+      <parameterDefinitions>
+        {''.join(parameter_definitions)}
+      </parameterDefinitions>
+    </hudson.model.ParametersDefinitionProperty>
+  </properties>
+  <definition class="org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition" plugin="workflow-cps">
+    <script>
+@Library('jenkins-shared-library@main') _
+main_template([
+  CLIENT_ID: "${{CLIENT_ID}}",
+  CLIENT_NAME: "${{CLIENT_NAME}}",
+  LICENSE_TYPE: "${{LICENSE_TYPE}}",
+  LICENSE_EXPIRES_AT: "${{LICENSE_EXPIRES_AT}}",
+  LICENSED_PIPELINES: "${{LICENSED_PIPELINES}}",
+  LICENSED_FEATURES: "${{LICENSED_FEATURES}}",
+  LICENSED_ENVIRONMENTS: "${{LICENSED_ENVIRONMENTS}}",
+  LICENSE_VALIDATION_MODE: "${{LICENSE_VALIDATION_MODE}}",
+  PROJECT_NAME: "${{PROJECT_NAME}}",
+  PROJECT_TYPE: "${{PROJECT_TYPE}}",
+  REPO_TYPE: "${{REPO_TYPE}}",
+  REPO_URL: "${{REPO_URL}}",
+  BRANCH: "${{BRANCH}}",
+  CREDENTIALS_ID: "${{CREDENTIALS_ID}}",
+  PIPELINE_KIND: "${{PIPELINE_KIND}}",
+  SERVICE_NAME: "${{SERVICE_NAME}}",
+  REQUESTED_BY: "${{REQUESTED_BY}}",
+  ENABLE_SONARQUBE: "${{ENABLE_SONARQUBE}}",
+  ENABLE_CHECKMARX: "${{ENABLE_CHECKMARX}}",
+  CHECKMARX_TEAM: "${{CHECKMARX_TEAM}}",
+  ENABLE_SOAPUI: "${{ENABLE_SOAPUI}}",
+  ENABLE_JMETER: "${{ENABLE_JMETER}}",
+  ENABLE_SELENIUM: "${{ENABLE_SELENIUM}}",
+  ENABLE_NEWMAN: "${{ENABLE_NEWMAN}}",
+  ENABLE_TRIVY: "${{ENABLE_TRIVY}}",
+  ENABLE_OPA: "${{ENABLE_OPA}}",
+  TARGET_ENV: "${{TARGET_ENV}}",
+  NOTIFY_EMAIL: "${{NOTIFY_EMAIL}}",
+  AWS_REGION: "${{AWS_REGION}}",
+  ECR_REGISTRY: "${{ECR_REGISTRY}}",
+  ECR_REPOSITORY: "${{ECR_REPOSITORY}}",
+  ARTIFACT_BUCKET: "${{ARTIFACT_BUCKET}}",
+  CLIENT_AWS_ROLE_ARN: "${{CLIENT_AWS_ROLE_ARN}}",
+  ENABLE_NOTIFICATIONS: "${{ENABLE_NOTIFICATIONS}}",
+  SNS_TOPIC_ARN: "${{SNS_TOPIC_ARN}}"
+])
+    </script>
+    <sandbox>true</sandbox>
+  </definition>
+</flow-definition>
+"""
+
+    job_url = f"{JENKINS_URL}/job/{job_name}/api/json"
+    job_check = requests.get(job_url, auth=(JENKINS_USER, JENKINS_TOKEN), verify=False)
+    if job_check.status_code == 200:
+        config_response = requests.post(
+            f"{JENKINS_URL}/job/{job_name}/config.xml",
+            headers={"Content-Type": "application/xml"},
+            auth=(JENKINS_USER, JENKINS_TOKEN),
+            data=job_config,
+            verify=False,
+        )
+        create_status = "updated"
+        create_response_code = config_response.status_code
+    else:
+        create_response = requests.post(
+            f"{JENKINS_URL}/createItem?name={job_name}",
+            headers={"Content-Type": "application/xml"},
+            auth=(JENKINS_USER, JENKINS_TOKEN),
+            data=job_config,
+            verify=False,
+        )
+        create_status = "created"
+        create_response_code = create_response.status_code
+
+    build_response = requests.post(
+        f"{JENKINS_URL}/job/{job_name}/buildWithParameters",
+        auth=(JENKINS_USER, JENKINS_TOKEN),
+        params=values,
+        verify=False,
+    )
+
+    return {
+        "status": f"Devops pipeline {create_status} and triggered",
+        "project_name": job_name,
+        "project_type": request.project_type,
+        "license": license_summary_doc,
+        "create_response_code": create_response_code,
+        "build_response_code": build_response.status_code,
+    }
+
 @app.post("/pipeline/trigger")
 def trigger_existing_pipeline(request: TriggerRequest):
     job_url = f"{JENKINS_URL}/job/{request.project_name}/api/json"
@@ -383,28 +718,22 @@ def get_vulnerabilities(
 
     results = query.order_by(Vulnerability.timestamp.desc()).all()
 
-    return [
-        {
-            "target": v.target,
-            "package_name": v.package_name,
-            "installed_version": v.installed_version,
-            "vulnerability_id": v.vulnerability_id,
-            "severity": v.severity,
-            "fixed_version": v.fixed_version,
-            "risk_score": v.risk_score,
-            "description": v.description,
-            "source": v.source,
-            "timestamp": v.timestamp,
-            "line": v.line,
-            "rule": v.rule,
-            "status": v.status,
-            "predictedSeverity": v.predicted_severity,
-            "jenkins_job": v.jenkins_job,
-            "build_number": v.build_number,
-            "jenkins_url": v.jenkins_url
-        }
-        for v in results
-    ]
+    return [serialize_security_finding(v) for v in results]
+
+@app.get("/security/findings")
+def get_security_findings(
+    email: str,
+    application: Optional[str] = None,
+    category: Optional[str] = None,
+    severity: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    findings = get_vulnerabilities(email=email, application=application, db=db)
+    if category:
+        findings = [f for f in findings if f.get("category") == category]
+    if severity:
+        findings = [f for f in findings if f.get("severity") == severity.upper()]
+    return findings
 
 @app.delete("/vulnerabilities/clear")
 def clear_vulnerabilities(db: Session = Depends(get_db)):
@@ -483,6 +812,72 @@ def get_dynamic_fix(violation: str) -> str:
         return "Set filesystem to read-only using readOnlyRootFilesystem"
     else:
         return "Review OPA policy and secure container accordingly"
+
+SECURITY_CATEGORY_BY_SOURCE = {
+    "TRIVY": "Container Vulnerability",
+    "SONARQUBE": "Code Security Finding",
+    "OPA": "Policy Violation",
+    "OPA-KUBERNETES": "Policy Violation",
+    "CHECKMARX": "Static Code Security Finding",
+}
+
+def normalize_security_category(source: Optional[str], package_name: Optional[str], vulnerability_id: Optional[str]) -> str:
+    source_key = (source or "").strip().upper()
+    if source_key in SECURITY_CATEGORY_BY_SOURCE:
+        return SECURITY_CATEGORY_BY_SOURCE[source_key]
+    if (package_name or "").lower().endswith("policy") or "policy" in (vulnerability_id or "").lower():
+        return "Policy Violation"
+    return "Security Finding"
+
+def normalize_remediation(v: Vulnerability) -> str:
+    if v.fixed_version and v.fixed_version not in {"N/A", "None"}:
+        if v.fixed_version.lower().startswith(("review", "use ", "avoid ", "set ", "drop ")):
+            return v.fixed_version
+        return f"Upgrade {v.package_name or 'the affected component'} to {v.fixed_version} or later."
+    if v.description:
+        return get_dynamic_fix(v.description)
+    return "Review the affected component, validate exploitability, and apply the recommended vendor fix."
+
+def serialize_security_finding(v: Vulnerability) -> dict:
+    category = normalize_security_category(v.source, v.package_name, v.vulnerability_id)
+    component = v.package_name or "Application"
+    title = v.vulnerability_id or v.rule or "Security finding"
+    fingerprint_source = "|".join([
+        str(v.application_id or ""),
+        category,
+        component,
+        title,
+        v.target or "",
+        str(v.line or ""),
+    ])
+    finding_id = hashlib.sha256(fingerprint_source.encode()).hexdigest()[:16]
+    return {
+        "finding_id": finding_id,
+        "category": category,
+        "target": v.target,
+        "affected_component": component,
+        "package_name": v.package_name,
+        "installed_version": v.installed_version,
+        "vulnerability_id": title,
+        "severity": (v.severity or "UNKNOWN").upper(),
+        "fixed_version": v.fixed_version,
+        "remediation": normalize_remediation(v),
+        "risk_score": v.risk_score,
+        "description": v.description,
+        "timestamp": v.timestamp,
+        "line": v.line,
+        "rule": v.rule,
+        "status": v.status or "Open",
+        "predictedSeverity": v.predicted_severity,
+        "jenkins_job": v.jenkins_job,
+        "build_number": v.build_number,
+        "jenkins_url": v.jenkins_url,
+        "traceability": {
+            "jenkins_job": v.jenkins_job,
+            "build_number": v.build_number,
+            "jenkins_url": v.jenkins_url,
+        },
+    }
     
 @app.post("/register_application")
 def register_application(request: RegisterAppRequest, db: Session = Depends(get_db)):
