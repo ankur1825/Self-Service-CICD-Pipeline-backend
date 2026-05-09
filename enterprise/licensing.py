@@ -26,6 +26,10 @@ def _expected_signature(payload: Dict[str, Any], secret: str) -> str:
     return base64.urlsafe_b64encode(digest).decode("utf-8").rstrip("=")
 
 
+def sign_license(payload: Dict[str, Any], secret: str) -> str:
+    return _expected_signature(payload, secret)
+
+
 def _split_csv(value: Optional[str]) -> list[str]:
     if not value:
         return []
@@ -51,10 +55,38 @@ def _load_license_file() -> Dict[str, Any]:
         return json.load(f)
 
 
+def _license_cache_path() -> Path:
+    return Path(os.getenv("ENTERPRISE_LICENSE_CACHE_FILE", "/app/data/enterprise-license-cache.json"))
+
+
+def load_cached_license() -> Dict[str, Any]:
+    path = _license_cache_path()
+    if not path.exists():
+        return {}
+    with path.open() as f:
+        return json.load(f)
+
+
+def save_cached_license(license_doc: Dict[str, Any]) -> Dict[str, Any]:
+    path = _license_cache_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cached_doc = {
+        **license_doc,
+        "last_synced_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+    with path.open("w") as f:
+        json.dump(cached_doc, f, indent=2, sort_keys=True)
+    return cached_doc
+
+
 def default_license_from_env() -> Dict[str, Any]:
     license_from_file = _load_license_file()
     if license_from_file:
         return license_from_file
+
+    cached_license = load_cached_license()
+    if cached_license:
+        return cached_license
 
     return {
         "client_id": os.getenv("ENTERPRISE_CLIENT_ID", "horizon-internal"),
@@ -63,11 +95,12 @@ def default_license_from_env() -> Dict[str, Any]:
         "license_type": os.getenv("ENTERPRISE_LICENSE_TYPE", "internal"),
         "expires_at": os.getenv("ENTERPRISE_LICENSE_EXPIRES_AT", "2099-12-31T23:59:59Z"),
         "enabled_pipelines": _split_csv(os.getenv("ENTERPRISE_ENABLED_PIPELINES", "Devops Pipeline,Test Devops Pipeline,Prod Devops Pipeline")),
-        "enabled_features": _split_csv(os.getenv("ENTERPRISE_ENABLED_FEATURES", "build,artifact_publish,code_scan,image_scan,policy_validation,static_application_security,test_suites,notifications,prod_deploy,ai_remediation")),
-        "allowed_environments": _split_csv(os.getenv("ENTERPRISE_ALLOWED_ENVIRONMENTS", "EKS-NONPROD,EKS-PROD")),
+        "enabled_features": _split_csv(os.getenv("ENTERPRISE_ENABLED_FEATURES", "build,artifact_publish,code_scan,image_scan,policy_validation,static_application_security,test_suites,notifications,secret_management,prod_deploy,ai_remediation")),
+        "allowed_environments": _split_csv(os.getenv("ENTERPRISE_ALLOWED_ENVIRONMENTS", "DEV,QA,STAGE,EKS-NONPROD,EKS-PROD")),
         "max_repos": int(os.getenv("ENTERPRISE_MAX_REPOS", "999999")),
         "max_builds_per_month": int(os.getenv("ENTERPRISE_MAX_BUILDS_PER_MONTH", "999999")),
         "max_users": int(os.getenv("ENTERPRISE_MAX_USERS", "999999")),
+        "license_mode": os.getenv("ENTERPRISE_LICENSE_MODE", "offline-file"),
     }
 
 
@@ -155,4 +188,6 @@ def license_summary(license_doc: Dict[str, Any]) -> Dict[str, Any]:
         "max_users": license_doc.get("max_users"),
         "status": license_doc.get("status", "unknown"),
         "validation_mode": license_doc.get("validation_mode", "unknown"),
+        "license_mode": license_doc.get("license_mode") or os.getenv("ENTERPRISE_LICENSE_MODE", "offline-file"),
+        "last_synced_at": license_doc.get("last_synced_at"),
     }

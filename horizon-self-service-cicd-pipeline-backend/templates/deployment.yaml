@@ -86,6 +86,19 @@ spec:
               value: {{ .Values.enterprise.maxUsers | quote }}
             - name: ENTERPRISE_LICENSE_FILE
               value: {{ .Values.enterprise.licenseFile | quote }}
+            - name: ENTERPRISE_LICENSE_MODE
+              value: {{ .Values.enterprise.licenseMode | quote }}
+            - name: ENTERPRISE_LICENSE_SYNC_ENDPOINT
+              value: {{ .Values.enterprise.licenseSyncEndpoint | quote }}
+            - name: ENTERPRISE_LICENSE_CACHE_FILE
+              value: {{ .Values.enterprise.licenseCacheFile | quote }}
+            {{- if .Values.enterprise.activationTokenSecret.existingSecret }}
+            - name: ENTERPRISE_LICENSE_ACTIVATION_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.enterprise.activationTokenSecret.existingSecret | quote }}
+                  key: {{ .Values.enterprise.activationTokenSecret.key | quote }}
+            {{- end }}
             {{- if .Values.enterprise.signingSecret.existingSecret }}
             - name: ENTERPRISE_LICENSE_SIGNING_SECRET
               valueFrom:

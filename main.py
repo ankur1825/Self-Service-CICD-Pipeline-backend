@@ -21,6 +21,7 @@ from enterprise.licensing import (
     default_license_from_env,
     license_summary,
     merge_request_license,
+    save_cached_license,
     validate_license,
 )
 
@@ -38,6 +39,50 @@ Base.metadata.create_all(bind=engine)
 JENKINS_URL = os.getenv("JENKINS_URL", "https://horizonrelevance.com/jenkins")
 JENKINS_USER = os.getenv("JENKINS_USER")
 JENKINS_TOKEN = os.getenv("JENKINS_TOKEN")
+
+def jenkins_headers(content_type: Optional[str] = None):
+    headers = {}
+    if content_type:
+        headers["Content-Type"] = content_type
+    try:
+        crumb_response = requests.get(
+            f"{JENKINS_URL}/crumbIssuer/api/json",
+            auth=(JENKINS_USER, JENKINS_TOKEN),
+            verify=False,
+            timeout=10,
+        )
+        if crumb_response.status_code == 200:
+            crumb = crumb_response.json()
+            headers[crumb["crumbRequestField"]] = crumb["crumb"]
+    except Exception as exc:
+        logger.warning("Unable to fetch Jenkins crumb: %s", exc)
+    return headers
+
+def jenkins_post(url: str, content_type: Optional[str] = None, data=None, params=None):
+    session = requests.Session()
+    headers = {}
+    if content_type:
+        headers["Content-Type"] = content_type
+    try:
+        crumb_response = session.get(
+            f"{JENKINS_URL}/crumbIssuer/api/json",
+            auth=(JENKINS_USER, JENKINS_TOKEN),
+            verify=False,
+            timeout=10,
+        )
+        if crumb_response.status_code == 200:
+            crumb = crumb_response.json()
+            headers[crumb["crumbRequestField"]] = crumb["crumb"]
+    except Exception as exc:
+        logger.warning("Unable to fetch Jenkins crumb for POST: %s", exc)
+    return session.post(
+        url,
+        headers=headers,
+        auth=(JENKINS_USER, JENKINS_TOKEN),
+        data=data,
+        params=params,
+        verify=False,
+    )
 
 # GitHub webhook secret
 GITHUB_WEBHOOK_SECRET = os.environ["GITHUB_WEBHOOK_SECRET"]
@@ -102,6 +147,8 @@ class DevopsPipelineRequest(BaseModel):
     ENABLE_JMETER: bool = False
     ENABLE_SELENIUM: bool = False
     ENABLE_NEWMAN: bool = False
+    ENABLE_RESTASSURED: bool = False
+    ENABLE_UFT: bool = False
     ENABLE_TRIVY: bool = False
     target_env: str = "EKS-NONPROD"
     notify_email: Optional[str] = None
@@ -110,6 +157,115 @@ class DevopsPipelineRequest(BaseModel):
     ecr_repository: str
     artifact_bucket: str
     client_aws_role_arn: Optional[str] = None
+    nonprod_aws_role_arn: Optional[str] = None
+    target_aws_role_arn: Optional[str] = None
+    dev_cluster_name: Optional[str] = None
+    qa_cluster_name: Optional[str] = None
+    stage_cluster_name: Optional[str] = None
+    prod_cluster_name: Optional[str] = None
+    namespace_strategy: str = "auto"
+    app_namespace: Optional[str] = None
+    dev_namespace: Optional[str] = None
+    qa_namespace: Optional[str] = None
+    stage_namespace: Optional[str] = None
+    prod_namespace: Optional[str] = None
+    enable_notifications: bool = False
+    sns_topic_arn: Optional[str] = None
+
+class TestDevopsPipelineRequest(BaseModel):
+    requestedBy: str
+    client_id: Optional[str] = None
+    client_name: Optional[str] = None
+    license_key: Optional[str] = None
+    license_signature: Optional[str] = None
+    license_expires_at: Optional[str] = None
+    license_type: Optional[str] = None
+    enabled_pipelines: Optional[List[str]] = None
+    enabled_features: Optional[List[str]] = None
+    allowed_environments: Optional[List[str]] = None
+    project_name: str
+    project_type: str
+    repo_type: str = "GitHub"
+    repo_url: str
+    branch: str = "main"
+    ENABLE_SONARQUBE: bool = False
+    ENABLE_CHECKMARX: bool = False
+    checkmarx_team: Optional[str] = None
+    ENABLE_SOAPUI: bool = False
+    ENABLE_JMETER: bool = False
+    ENABLE_SELENIUM: bool = False
+    ENABLE_NEWMAN: bool = False
+    ENABLE_RESTASSURED: bool = False
+    ENABLE_UFT: bool = False
+    ENABLE_TRIVY: bool = False
+    ENABLE_OPA: bool = False
+    image_uri: Optional[str] = None
+    target_app_url: Optional[str] = None
+    api_base_url: Optional[str] = None
+    jmeter_test_plan: Optional[str] = None
+    jmeter_threads: Optional[str] = "10"
+    jmeter_ramp_seconds: Optional[str] = "30"
+    jmeter_loops: Optional[str] = "5"
+    jmeter_max_error_percent: Optional[str] = "1"
+    jmeter_max_avg_ms: Optional[str] = "2000"
+    jmeter_max_p95_ms: Optional[str] = "5000"
+    newman_collection_path: Optional[str] = None
+    newman_environment_path: Optional[str] = None
+    newman_data_file: Optional[str] = None
+    newman_timeout_ms: Optional[str] = "30000"
+    newman_fail_on_error: bool = True
+    target_env: str = "QA"
+    notify_email: Optional[str] = None
+    aws_region: str = "us-east-1"
+    artifact_bucket: Optional[str] = None
+    client_aws_role_arn: Optional[str] = None
+    nonprod_aws_role_arn: Optional[str] = None
+    target_aws_role_arn: Optional[str] = None
+    enable_notifications: bool = False
+    sns_topic_arn: Optional[str] = None
+
+class ProdDevopsPipelineRequest(BaseModel):
+    requestedBy: str
+    client_id: Optional[str] = None
+    client_name: Optional[str] = None
+    license_key: Optional[str] = None
+    license_signature: Optional[str] = None
+    license_expires_at: Optional[str] = None
+    license_type: Optional[str] = None
+    enabled_pipelines: Optional[List[str]] = None
+    enabled_features: Optional[List[str]] = None
+    allowed_environments: Optional[List[str]] = None
+    project_name: str
+    artifact_bucket: str
+    artifact_prefix: str
+    image_json_path: Optional[str] = None
+    template_config_path: Optional[str] = None
+    source_env: str = "STAGE"
+    target_env: str = "EKS-PROD"
+    aws_region: str = "us-east-1"
+    source_ecr_registry: str
+    source_ecr_repository: str
+    target_ecr_registry: str
+    target_ecr_repository: str
+    source_image_tag: Optional[str] = None
+    target_image_tag: str = "prod"
+    client_aws_role_arn: Optional[str] = None
+    source_aws_role_arn: Optional[str] = None
+    target_aws_role_arn: Optional[str] = None
+    dev_cluster_name: Optional[str] = None
+    qa_cluster_name: Optional[str] = None
+    stage_cluster_name: Optional[str] = None
+    prod_cluster_name: Optional[str] = None
+    namespace_strategy: str = "auto"
+    app_namespace: Optional[str] = None
+    dev_namespace: Optional[str] = None
+    qa_namespace: Optional[str] = None
+    stage_namespace: Optional[str] = None
+    prod_namespace: Optional[str] = None
+    secret_enabled: bool = False
+    xid_array: Optional[str] = None
+    approver: Optional[str] = None
+    notify_email: Optional[str] = None
     enable_notifications: bool = False
     sns_topic_arn: Optional[str] = None
 
@@ -127,6 +283,9 @@ class LicenseValidationRequest(BaseModel):
     target_env: str = "EKS-NONPROD"
     requested_features: List[str] = []
 
+class LicenseSyncRequest(BaseModel):
+    force: Optional[bool] = False
+
 class TriggerRequest(BaseModel):
     project_name: str
 
@@ -139,7 +298,7 @@ class VulnerabilityModel(BaseModel):
     fixed_version: Optional[str] = None
     risk_score: float = 0.0
     description: Optional[str] = None
-    source: Optional[str] = "Trivy"
+    source: Optional[str] = "Security Finding"
     timestamp: Optional[str] = None
     line: Optional[int] = None
     rule: Optional[str] = None
@@ -159,7 +318,7 @@ class OPARiskModel(BaseModel):
     risk_score: float
     package_name: Optional[str] = "OPA Policy"       
     installed_version: Optional[str] = "N/A"  
-    source: Optional[str] = "OPA"    
+    source: Optional[str] = "Policy Violation"    
     description: Optional[str] = ""
     remediation: Optional[str] = ""
     jenkins_job: Optional[str] = None
@@ -206,6 +365,30 @@ def requested_devops_features(request: DevopsPipelineRequest) -> List[str]:
         features.append("notifications")
     return features
 
+def requested_test_devops_features(request: TestDevopsPipelineRequest) -> List[str]:
+    features = []
+    if request.ENABLE_SONARQUBE:
+        features.append("code_scan")
+    if request.ENABLE_TRIVY:
+        features.append("image_scan")
+    if request.ENABLE_OPA:
+        features.append("policy_scan")
+    if request.ENABLE_CHECKMARX:
+        features.append("static_application_security")
+    if request.ENABLE_SOAPUI or request.ENABLE_JMETER or request.ENABLE_SELENIUM or request.ENABLE_NEWMAN or request.ENABLE_RESTASSURED or request.ENABLE_UFT:
+        features.append("test_suites")
+    if request.enable_notifications:
+        features.append("notifications")
+    return features
+
+def requested_prod_devops_features(request: ProdDevopsPipelineRequest) -> List[str]:
+    features = ["artifact_publish", "prod_deploy"]
+    if request.secret_enabled:
+        features.append("secret_management")
+    if request.enable_notifications:
+        features.append("notifications")
+    return features
+
 @app.get("/license/status")
 def get_license_status():
     license_doc = default_license_from_env()
@@ -236,6 +419,79 @@ def validate_enterprise_license(request: LicenseValidationRequest):
         return license_summary(validated)
     except LicenseValidationError as exc:
         return JSONResponse(status_code=403, content={"error": str(exc), "status": "invalid"})
+
+@app.post("/license/sync")
+def sync_enterprise_license(request: LicenseSyncRequest):
+    license_mode = os.getenv("ENTERPRISE_LICENSE_MODE", "offline-file").strip().lower()
+    sync_endpoint = os.getenv("ENTERPRISE_LICENSE_SYNC_ENDPOINT", "").strip()
+    activation_token = os.getenv("ENTERPRISE_LICENSE_ACTIVATION_TOKEN", "").strip()
+    current_license = default_license_from_env()
+
+    if license_mode != "online-sync":
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "Online license sync is not enabled for this deployment.",
+                "status": "sync_disabled",
+                "license_mode": license_mode,
+            },
+        )
+    if not sync_endpoint:
+        return JSONResponse(status_code=400, content={"error": "ENTERPRISE_LICENSE_SYNC_ENDPOINT is required.", "status": "sync_failed"})
+    if not activation_token:
+        return JSONResponse(status_code=400, content={"error": "ENTERPRISE_LICENSE_ACTIVATION_TOKEN is required.", "status": "sync_failed"})
+
+    payload = {
+        "client_id": current_license.get("client_id") or os.getenv("ENTERPRISE_CLIENT_ID", ""),
+        "client_name": current_license.get("client_name") or os.getenv("ENTERPRISE_CLIENT_NAME", ""),
+        "activation_token": activation_token,
+        "current_license_key": current_license.get("license_key", ""),
+        "current_expires_at": current_license.get("expires_at", ""),
+        "force": bool(request.force),
+        "platform": {
+            "product": "Horizon Relevance AI DevSecOps Platform",
+            "backend_root_path": "/pipeline/api",
+            "license_mode": license_mode,
+        },
+    }
+
+    try:
+        response = requests.post(sync_endpoint, json=payload, timeout=15)
+    except requests.RequestException as exc:
+        logger.exception("License sync failed while calling Horizon license service")
+        return JSONResponse(status_code=502, content={"error": f"License service unreachable: {exc}", "status": "sync_failed"})
+
+    if response.status_code >= 400:
+        try:
+            error_body = response.json()
+        except ValueError:
+            error_body = {"error": response.text}
+        error_body.setdefault("status", "sync_failed")
+        return JSONResponse(status_code=response.status_code, content=error_body)
+
+    try:
+        response_body = response.json()
+    except ValueError:
+        return JSONResponse(status_code=502, content={"error": "License service returned non-JSON response.", "status": "sync_failed"})
+
+    synced_license = response_body.get("license") or response_body
+    synced_license["license_mode"] = "online-sync"
+
+    try:
+        validated = validate_license(
+            synced_license,
+            pipeline_name="Devops Pipeline",
+            target_env=(synced_license.get("allowed_environments") or ["DEV"])[0],
+            requested_features=[],
+        )
+    except LicenseValidationError as exc:
+        return JSONResponse(status_code=403, content={"error": str(exc), "status": "sync_invalid"})
+
+    cached = save_cached_license(validated)
+    summary = license_summary(cached)
+    summary["status"] = "active"
+    summary["message"] = response_body.get("message", "License synced successfully.")
+    return summary
 
 @app.post("/login")
 async def login(request: Request):
@@ -380,7 +636,7 @@ main_template([
 """
     create_response = requests.post(
         f"{JENKINS_URL}/createItem?name={request.project_name}",
-        headers={"Content-Type": "application/xml"},
+        headers=jenkins_headers("application/xml"),
         auth=(JENKINS_USER, JENKINS_TOKEN),
         data=job_config,
         verify=False
@@ -464,14 +720,16 @@ def create_devops_pipeline(request: DevopsPipelineRequest):
         "PIPELINE_KIND": "DEVOPS",
         "SERVICE_NAME": "Devops Pipeline",
         "REQUESTED_BY": request.requestedBy,
-        "ENABLE_SONARQUBE": str(request.ENABLE_SONARQUBE).lower(),
-        "ENABLE_CHECKMARX": str(request.ENABLE_CHECKMARX).lower(),
-        "CHECKMARX_TEAM": (request.checkmarx_team or "").strip(),
-        "ENABLE_SOAPUI": str(request.ENABLE_SOAPUI).lower(),
-        "ENABLE_JMETER": str(request.ENABLE_JMETER).lower(),
-        "ENABLE_SELENIUM": str(request.ENABLE_SELENIUM).lower(),
-        "ENABLE_NEWMAN": str(request.ENABLE_NEWMAN).lower(),
-        "ENABLE_TRIVY": str(request.ENABLE_TRIVY).lower(),
+        "ENABLE_SONARQUBE": "false",
+        "ENABLE_CHECKMARX": "false",
+        "CHECKMARX_TEAM": "",
+        "ENABLE_SOAPUI": "false",
+        "ENABLE_JMETER": "false",
+        "ENABLE_SELENIUM": "false",
+        "ENABLE_NEWMAN": "false",
+        "ENABLE_RESTASSURED": "false",
+        "ENABLE_UFT": "false",
+        "ENABLE_TRIVY": "false",
         "ENABLE_OPA": "false",
         "TARGET_ENV": request.target_env,
         "NOTIFY_EMAIL": (request.notify_email or "").strip(),
@@ -480,6 +738,18 @@ def create_devops_pipeline(request: DevopsPipelineRequest):
         "ECR_REPOSITORY": request.ecr_repository.strip(),
         "ARTIFACT_BUCKET": request.artifact_bucket.strip(),
         "CLIENT_AWS_ROLE_ARN": (request.client_aws_role_arn or "").strip(),
+        "NONPROD_AWS_ROLE_ARN": (request.nonprod_aws_role_arn or request.client_aws_role_arn or "").strip(),
+        "TARGET_AWS_ROLE_ARN": (request.target_aws_role_arn or request.nonprod_aws_role_arn or request.client_aws_role_arn or "").strip(),
+        "DEV_CLUSTER_NAME": (request.dev_cluster_name or "").strip(),
+        "QA_CLUSTER_NAME": (request.qa_cluster_name or "").strip(),
+        "STAGE_CLUSTER_NAME": (request.stage_cluster_name or "").strip(),
+        "PROD_CLUSTER_NAME": (request.prod_cluster_name or "").strip(),
+        "NAMESPACE_STRATEGY": (request.namespace_strategy or "auto").strip(),
+        "APP_NAMESPACE": (request.app_namespace or "").strip(),
+        "DEV_NAMESPACE": (request.dev_namespace or "").strip(),
+        "QA_NAMESPACE": (request.qa_namespace or "").strip(),
+        "STAGE_NAMESPACE": (request.stage_namespace or "").strip(),
+        "PROD_NAMESPACE": (request.prod_namespace or "").strip(),
         "ENABLE_NOTIFICATIONS": str(request.enable_notifications).lower(),
         "SNS_TOPIC_ARN": (request.sns_topic_arn or "").strip(),
     }
@@ -492,6 +762,8 @@ def create_devops_pipeline(request: DevopsPipelineRequest):
         "ENABLE_JMETER",
         "ENABLE_SELENIUM",
         "ENABLE_NEWMAN",
+        "ENABLE_RESTASSURED",
+        "ENABLE_UFT",
         "ENABLE_TRIVY",
         "ENABLE_OPA",
         "ENABLE_NOTIFICATIONS",
@@ -522,6 +794,18 @@ def create_devops_pipeline(request: DevopsPipelineRequest):
         "ECR_REPOSITORY",
         "ARTIFACT_BUCKET",
         "CLIENT_AWS_ROLE_ARN",
+        "NONPROD_AWS_ROLE_ARN",
+        "TARGET_AWS_ROLE_ARN",
+        "DEV_CLUSTER_NAME",
+        "QA_CLUSTER_NAME",
+        "STAGE_CLUSTER_NAME",
+        "PROD_CLUSTER_NAME",
+        "NAMESPACE_STRATEGY",
+        "APP_NAMESPACE",
+        "DEV_NAMESPACE",
+        "QA_NAMESPACE",
+        "STAGE_NAMESPACE",
+        "PROD_NAMESPACE",
         "SNS_TOPIC_ARN",
     ]
 
@@ -588,6 +872,18 @@ main_template([
   ECR_REPOSITORY: "${{ECR_REPOSITORY}}",
   ARTIFACT_BUCKET: "${{ARTIFACT_BUCKET}}",
   CLIENT_AWS_ROLE_ARN: "${{CLIENT_AWS_ROLE_ARN}}",
+  NONPROD_AWS_ROLE_ARN: "${{NONPROD_AWS_ROLE_ARN}}",
+  TARGET_AWS_ROLE_ARN: "${{TARGET_AWS_ROLE_ARN}}",
+  DEV_CLUSTER_NAME: "${{DEV_CLUSTER_NAME}}",
+  QA_CLUSTER_NAME: "${{QA_CLUSTER_NAME}}",
+  STAGE_CLUSTER_NAME: "${{STAGE_CLUSTER_NAME}}",
+  PROD_CLUSTER_NAME: "${{PROD_CLUSTER_NAME}}",
+  NAMESPACE_STRATEGY: "${{NAMESPACE_STRATEGY}}",
+  APP_NAMESPACE: "${{APP_NAMESPACE}}",
+  DEV_NAMESPACE: "${{DEV_NAMESPACE}}",
+  QA_NAMESPACE: "${{QA_NAMESPACE}}",
+  STAGE_NAMESPACE: "${{STAGE_NAMESPACE}}",
+  PROD_NAMESPACE: "${{PROD_NAMESPACE}}",
   ENABLE_NOTIFICATIONS: "${{ENABLE_NOTIFICATIONS}}",
   SNS_TOPIC_ARN: "${{SNS_TOPIC_ARN}}"
 ])
@@ -600,37 +896,373 @@ main_template([
     job_url = f"{JENKINS_URL}/job/{job_name}/api/json"
     job_check = requests.get(job_url, auth=(JENKINS_USER, JENKINS_TOKEN), verify=False)
     if job_check.status_code == 200:
-        config_response = requests.post(
+        config_response = jenkins_post(
             f"{JENKINS_URL}/job/{job_name}/config.xml",
-            headers={"Content-Type": "application/xml"},
-            auth=(JENKINS_USER, JENKINS_TOKEN),
+            content_type="application/xml",
             data=job_config,
-            verify=False,
         )
         create_status = "updated"
         create_response_code = config_response.status_code
     else:
-        create_response = requests.post(
+        create_response = jenkins_post(
             f"{JENKINS_URL}/createItem?name={job_name}",
-            headers={"Content-Type": "application/xml"},
-            auth=(JENKINS_USER, JENKINS_TOKEN),
+            content_type="application/xml",
             data=job_config,
-            verify=False,
         )
         create_status = "created"
         create_response_code = create_response.status_code
 
-    build_response = requests.post(
+    build_response = jenkins_post(
         f"{JENKINS_URL}/job/{job_name}/buildWithParameters",
-        auth=(JENKINS_USER, JENKINS_TOKEN),
         params=values,
-        verify=False,
     )
 
     return {
         "status": f"Devops pipeline {create_status} and triggered",
         "project_name": job_name,
         "project_type": request.project_type,
+        "license": license_summary_doc,
+        "create_response_code": create_response_code,
+        "build_response_code": build_response.status_code,
+    }
+
+@app.post("/test/devops/pipeline")
+def create_test_devops_pipeline(request: TestDevopsPipelineRequest):
+    allowed_project_types = {
+        "Docker",
+        "Angular",
+        "SpringBoot",
+        "SpringBoot-Java11",
+        "NodeJs",
+        "WebComponent",
+    }
+    if request.project_type not in allowed_project_types:
+        return JSONResponse(status_code=400, content={"error": "Unsupported project_type", "supported_project_types": sorted(allowed_project_types)})
+
+    job_name = f"{request.project_name.strip()}-test"
+    if not request.project_name.strip():
+        return JSONResponse(status_code=400, content={"error": "project_name is required"})
+
+    license_doc = merge_request_license(request.dict())
+    try:
+        validated_license = validate_license(
+            license_doc,
+            pipeline_name="Test Devops Pipeline",
+            target_env=request.target_env,
+            requested_features=requested_test_devops_features(request),
+        )
+    except LicenseValidationError as exc:
+        return JSONResponse(status_code=403, content={"error": str(exc), "status": "license_denied"})
+
+    values = {
+        "CLIENT_ID": str(validated_license.get("client_id") or "").strip(),
+        "CLIENT_NAME": str(validated_license.get("client_name") or "").strip(),
+        "LICENSE_TYPE": str(validated_license.get("license_type") or "").strip(),
+        "LICENSE_EXPIRES_AT": str(validated_license.get("expires_at") or "").strip(),
+        "LICENSED_PIPELINES": ",".join(validated_license.get("enabled_pipelines") or []),
+        "LICENSED_FEATURES": ",".join(validated_license.get("enabled_features") or []),
+        "LICENSED_ENVIRONMENTS": ",".join(validated_license.get("allowed_environments") or []),
+        "LICENSE_VALIDATION_MODE": str(validated_license.get("validation_mode") or "unknown"),
+        "PROJECT_NAME": request.project_name.strip(),
+        "PROJECT_TYPE": request.project_type,
+        "REPO_TYPE": request.repo_type,
+        "REPO_URL": request.repo_url.strip(),
+        "BRANCH": request.branch.strip() or "main",
+        "CREDENTIALS_ID": "github-token",
+        "PIPELINE_KIND": "TEST_DEVOPS",
+        "SERVICE_NAME": "Test Devops Pipeline",
+        "REQUESTED_BY": request.requestedBy,
+        "ENABLE_SONARQUBE": str(request.ENABLE_SONARQUBE).lower(),
+        "ENABLE_CHECKMARX": str(request.ENABLE_CHECKMARX).lower(),
+        "CHECKMARX_TEAM": (request.checkmarx_team or "").strip(),
+        "ENABLE_SOAPUI": str(request.ENABLE_SOAPUI).lower(),
+        "ENABLE_JMETER": str(request.ENABLE_JMETER).lower(),
+        "ENABLE_SELENIUM": str(request.ENABLE_SELENIUM).lower(),
+        "ENABLE_NEWMAN": str(request.ENABLE_NEWMAN).lower(),
+        "ENABLE_RESTASSURED": str(request.ENABLE_RESTASSURED).lower(),
+        "ENABLE_UFT": str(request.ENABLE_UFT).lower(),
+        "ENABLE_TRIVY": str(request.ENABLE_TRIVY).lower(),
+        "ENABLE_OPA": str(request.ENABLE_OPA).lower(),
+        "IMAGE_URI": (request.image_uri or "").strip(),
+        "TARGET_APP_URL": (request.target_app_url or "").strip(),
+        "API_BASE_URL": (request.api_base_url or request.target_app_url or "").strip(),
+        "JMETER_BASE_URL": (request.target_app_url or request.api_base_url or "").strip(),
+        "JMETER_TEST_PLAN": (request.jmeter_test_plan or "").strip(),
+        "JMETER_THREADS": str(request.jmeter_threads or "10").strip(),
+        "JMETER_RAMP_SECONDS": str(request.jmeter_ramp_seconds or "30").strip(),
+        "JMETER_LOOPS": str(request.jmeter_loops or "5").strip(),
+        "JMETER_MAX_ERROR_PERCENT": str(request.jmeter_max_error_percent or "1").strip(),
+        "JMETER_MAX_AVG_MS": str(request.jmeter_max_avg_ms or "2000").strip(),
+        "JMETER_MAX_P95_MS": str(request.jmeter_max_p95_ms or "5000").strip(),
+        "NEWMAN_COLLECTION_PATH": (request.newman_collection_path or "").strip(),
+        "NEWMAN_ENVIRONMENT_PATH": (request.newman_environment_path or "").strip(),
+        "NEWMAN_DATA_FILE": (request.newman_data_file or "").strip(),
+        "NEWMAN_TIMEOUT_MS": str(request.newman_timeout_ms or "30000").strip(),
+        "NEWMAN_FAIL_ON_ERROR": str(request.newman_fail_on_error).lower(),
+        "TARGET_ENV": request.target_env.strip(),
+        "NOTIFY_EMAIL": (request.notify_email or "").strip(),
+        "AWS_REGION": request.aws_region.strip() or "us-east-1",
+        "ARTIFACT_BUCKET": (request.artifact_bucket or "").strip(),
+        "CLIENT_AWS_ROLE_ARN": (request.client_aws_role_arn or "").strip(),
+        "NONPROD_AWS_ROLE_ARN": (request.nonprod_aws_role_arn or request.client_aws_role_arn or "").strip(),
+        "TARGET_AWS_ROLE_ARN": (request.target_aws_role_arn or request.nonprod_aws_role_arn or request.client_aws_role_arn or "").strip(),
+        "ENABLE_NOTIFICATIONS": str(request.enable_notifications).lower(),
+        "SNS_TOPIC_ARN": (request.sns_topic_arn or "").strip(),
+    }
+    xml_values = {k: escape(v, quote=True) for k, v in values.items()}
+    bool_param_names = [
+        "ENABLE_SONARQUBE", "ENABLE_CHECKMARX", "ENABLE_SOAPUI", "ENABLE_JMETER",
+        "ENABLE_SELENIUM", "ENABLE_NEWMAN", "ENABLE_RESTASSURED", "ENABLE_UFT",
+        "ENABLE_TRIVY", "ENABLE_OPA", "ENABLE_NOTIFICATIONS", "NEWMAN_FAIL_ON_ERROR",
+    ]
+    string_param_names = [name for name in values.keys() if name not in bool_param_names]
+
+    parameter_definitions = []
+    for name in string_param_names:
+        parameter_definitions.append(f"""
+        <hudson.model.StringParameterDefinition>
+          <name>{name}</name>
+          <defaultValue>{xml_values[name]}</defaultValue>
+          <description>{name}</description>
+        </hudson.model.StringParameterDefinition>""")
+    for name in bool_param_names:
+        parameter_definitions.append(f"""
+        <hudson.model.BooleanParameterDefinition>
+          <name>{name}</name>
+          <defaultValue>{xml_values[name]}</defaultValue>
+          <description>{name}</description>
+        </hudson.model.BooleanParameterDefinition>""")
+
+    params_map = "\n".join([f'  {name}: "${{{name}}}",' for name in values.keys()]).rstrip(',')
+    job_config = f"""
+<flow-definition plugin="workflow-job">
+  <description>Test Devops Pipeline for {xml_values["PROJECT_NAME"]}</description>
+  <properties>
+    <hudson.model.ParametersDefinitionProperty>
+      <parameterDefinitions>
+        {''.join(parameter_definitions)}
+      </parameterDefinitions>
+    </hudson.model.ParametersDefinitionProperty>
+  </properties>
+  <definition class="org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition" plugin="workflow-cps">
+    <script>
+@Library('jenkins-shared-library@main') _
+main_template([
+{params_map}
+])
+    </script>
+    <sandbox>true</sandbox>
+  </definition>
+</flow-definition>
+"""
+
+    job_url = f"{JENKINS_URL}/job/{job_name}/api/json"
+    job_check = requests.get(job_url, auth=(JENKINS_USER, JENKINS_TOKEN), verify=False)
+    if job_check.status_code == 200:
+        config_response = jenkins_post(f"{JENKINS_URL}/job/{job_name}/config.xml", content_type="application/xml", data=job_config)
+        create_status = "updated"
+        create_response_code = config_response.status_code
+    else:
+        create_response = jenkins_post(f"{JENKINS_URL}/createItem?name={job_name}", content_type="application/xml", data=job_config)
+        create_status = "created"
+        create_response_code = create_response.status_code
+
+    build_response = jenkins_post(f"{JENKINS_URL}/job/{job_name}/buildWithParameters", params=values)
+
+    return {
+        "status": f"Test Devops pipeline {create_status} and triggered",
+        "project_name": request.project_name.strip(),
+        "jenkins_job": job_name,
+        "project_type": request.project_type,
+        "license": license_summary(validated_license),
+        "create_response_code": create_response_code,
+        "build_response_code": build_response.status_code,
+    }
+
+@app.post("/prod/devops/pipeline")
+def create_prod_devops_pipeline(request: ProdDevopsPipelineRequest):
+    job_name = f"{request.project_name.strip()}-prod"
+    if not request.project_name.strip():
+        return JSONResponse(status_code=400, content={"error": "project_name is required"})
+    if "PROD" not in (request.target_env or "").upper():
+        return JSONResponse(status_code=400, content={"error": "Prod DevOps Pipeline only supports PROD target environments"})
+
+    license_doc = merge_request_license(request.dict())
+    try:
+        validated_license = validate_license(
+            license_doc,
+            pipeline_name="Prod Devops Pipeline",
+            target_env=request.target_env,
+            requested_features=requested_prod_devops_features(request),
+        )
+    except LicenseValidationError as exc:
+        return JSONResponse(status_code=403, content={"error": str(exc), "status": "license_denied"})
+
+    license_summary_doc = license_summary(validated_license)
+    artifact_prefix = request.artifact_prefix.strip().strip("/")
+    image_json_path = (request.image_json_path or f"{artifact_prefix}/image.json").strip().lstrip("/")
+    template_config_path = (request.template_config_path or f"{artifact_prefix}/templateconfiguration.json").strip().lstrip("/")
+
+    values = {
+        "CLIENT_ID": str(validated_license.get("client_id") or "").strip(),
+        "CLIENT_NAME": str(validated_license.get("client_name") or "").strip(),
+        "LICENSE_TYPE": str(validated_license.get("license_type") or "").strip(),
+        "LICENSE_EXPIRES_AT": str(validated_license.get("expires_at") or "").strip(),
+        "LICENSED_PIPELINES": ",".join(validated_license.get("enabled_pipelines") or []),
+        "LICENSED_FEATURES": ",".join(validated_license.get("enabled_features") or []),
+        "LICENSED_ENVIRONMENTS": ",".join(validated_license.get("allowed_environments") or []),
+        "LICENSE_VALIDATION_MODE": str(validated_license.get("validation_mode") or "unknown"),
+        "PROJECT_NAME": request.project_name.strip(),
+        "PIPELINE_KIND": "PROD_DEVOPS",
+        "SERVICE_NAME": "Prod Devops Pipeline",
+        "REQUESTED_BY": request.requestedBy,
+        "ARTIFACT_BUCKET": request.artifact_bucket.strip(),
+        "ARTIFACT_PREFIX": artifact_prefix,
+        "IMAGE_JSON_PATH": image_json_path,
+        "TEMPLATE_CONFIG_PATH": template_config_path,
+        "SOURCE_ENV": request.source_env.strip(),
+        "TARGET_ENV": request.target_env.strip(),
+        "AWS_REGION": request.aws_region.strip() or "us-east-1",
+        "SOURCE_ECR_REGISTRY": request.source_ecr_registry.strip(),
+        "SOURCE_ECR_REPOSITORY": request.source_ecr_repository.strip(),
+        "TARGET_ECR_REGISTRY": request.target_ecr_registry.strip(),
+        "TARGET_ECR_REPOSITORY": request.target_ecr_repository.strip(),
+        "SOURCE_IMAGE_TAG": (request.source_image_tag or "").strip(),
+        "TARGET_IMAGE_TAG": request.target_image_tag.strip() or "prod",
+        "CLIENT_AWS_ROLE_ARN": (request.client_aws_role_arn or "").strip(),
+        "SOURCE_AWS_ROLE_ARN": (request.source_aws_role_arn or request.client_aws_role_arn or "").strip(),
+        "TARGET_AWS_ROLE_ARN": (request.target_aws_role_arn or request.client_aws_role_arn or "").strip(),
+        "DEV_CLUSTER_NAME": (request.dev_cluster_name or "").strip(),
+        "QA_CLUSTER_NAME": (request.qa_cluster_name or "").strip(),
+        "STAGE_CLUSTER_NAME": (request.stage_cluster_name or "").strip(),
+        "PROD_CLUSTER_NAME": (request.prod_cluster_name or "").strip(),
+        "NAMESPACE_STRATEGY": (request.namespace_strategy or "auto").strip(),
+        "APP_NAMESPACE": (request.app_namespace or "").strip(),
+        "DEV_NAMESPACE": (request.dev_namespace or "").strip(),
+        "QA_NAMESPACE": (request.qa_namespace or "").strip(),
+        "STAGE_NAMESPACE": (request.stage_namespace or "").strip(),
+        "PROD_NAMESPACE": (request.prod_namespace or "").strip(),
+        "SECRET_ENABLED": str(request.secret_enabled).lower(),
+        "XID_ARRAY": (request.xid_array or "").strip(),
+        "APPROVER": (request.approver or "").strip(),
+        "NOTIFY_EMAIL": (request.notify_email or "").strip(),
+        "ENABLE_NOTIFICATIONS": str(request.enable_notifications).lower(),
+        "SNS_TOPIC_ARN": (request.sns_topic_arn or "").strip(),
+    }
+    xml_values = {k: escape(v, quote=True) for k, v in values.items()}
+
+    bool_param_names = ["SECRET_ENABLED", "ENABLE_NOTIFICATIONS"]
+    string_param_names = [name for name in values.keys() if name not in bool_param_names]
+
+    parameter_definitions = []
+    for name in string_param_names:
+        parameter_definitions.append(f"""
+        <hudson.model.StringParameterDefinition>
+          <name>{name}</name>
+          <defaultValue>{xml_values[name]}</defaultValue>
+          <description>{name}</description>
+        </hudson.model.StringParameterDefinition>""")
+    for name in bool_param_names:
+        parameter_definitions.append(f"""
+        <hudson.model.BooleanParameterDefinition>
+          <name>{name}</name>
+          <defaultValue>{xml_values[name]}</defaultValue>
+          <description>{name}</description>
+        </hudson.model.BooleanParameterDefinition>""")
+
+    job_config = f"""
+<flow-definition plugin="workflow-job">
+  <description>Prod Devops Pipeline for {xml_values["PROJECT_NAME"]}</description>
+  <properties>
+    <hudson.model.ParametersDefinitionProperty>
+      <parameterDefinitions>
+        {''.join(parameter_definitions)}
+      </parameterDefinitions>
+    </hudson.model.ParametersDefinitionProperty>
+  </properties>
+  <definition class="org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition" plugin="workflow-cps">
+    <script>
+@Library('jenkins-shared-library@main') _
+main_template([
+  CLIENT_ID: "${{CLIENT_ID}}",
+  CLIENT_NAME: "${{CLIENT_NAME}}",
+  LICENSE_TYPE: "${{LICENSE_TYPE}}",
+  LICENSE_EXPIRES_AT: "${{LICENSE_EXPIRES_AT}}",
+  LICENSED_PIPELINES: "${{LICENSED_PIPELINES}}",
+  LICENSED_FEATURES: "${{LICENSED_FEATURES}}",
+  LICENSED_ENVIRONMENTS: "${{LICENSED_ENVIRONMENTS}}",
+  LICENSE_VALIDATION_MODE: "${{LICENSE_VALIDATION_MODE}}",
+  PROJECT_NAME: "${{PROJECT_NAME}}",
+  PIPELINE_KIND: "${{PIPELINE_KIND}}",
+  SERVICE_NAME: "${{SERVICE_NAME}}",
+  REQUESTED_BY: "${{REQUESTED_BY}}",
+  ARTIFACT_BUCKET: "${{ARTIFACT_BUCKET}}",
+  ARTIFACT_PREFIX: "${{ARTIFACT_PREFIX}}",
+  IMAGE_JSON_PATH: "${{IMAGE_JSON_PATH}}",
+  TEMPLATE_CONFIG_PATH: "${{TEMPLATE_CONFIG_PATH}}",
+  SOURCE_ENV: "${{SOURCE_ENV}}",
+  TARGET_ENV: "${{TARGET_ENV}}",
+  AWS_REGION: "${{AWS_REGION}}",
+  SOURCE_ECR_REGISTRY: "${{SOURCE_ECR_REGISTRY}}",
+  SOURCE_ECR_REPOSITORY: "${{SOURCE_ECR_REPOSITORY}}",
+  TARGET_ECR_REGISTRY: "${{TARGET_ECR_REGISTRY}}",
+  TARGET_ECR_REPOSITORY: "${{TARGET_ECR_REPOSITORY}}",
+  SOURCE_IMAGE_TAG: "${{SOURCE_IMAGE_TAG}}",
+  TARGET_IMAGE_TAG: "${{TARGET_IMAGE_TAG}}",
+  CLIENT_AWS_ROLE_ARN: "${{CLIENT_AWS_ROLE_ARN}}",
+  SOURCE_AWS_ROLE_ARN: "${{SOURCE_AWS_ROLE_ARN}}",
+  TARGET_AWS_ROLE_ARN: "${{TARGET_AWS_ROLE_ARN}}",
+  DEV_CLUSTER_NAME: "${{DEV_CLUSTER_NAME}}",
+  QA_CLUSTER_NAME: "${{QA_CLUSTER_NAME}}",
+  STAGE_CLUSTER_NAME: "${{STAGE_CLUSTER_NAME}}",
+  PROD_CLUSTER_NAME: "${{PROD_CLUSTER_NAME}}",
+  NAMESPACE_STRATEGY: "${{NAMESPACE_STRATEGY}}",
+  APP_NAMESPACE: "${{APP_NAMESPACE}}",
+  DEV_NAMESPACE: "${{DEV_NAMESPACE}}",
+  QA_NAMESPACE: "${{QA_NAMESPACE}}",
+  STAGE_NAMESPACE: "${{STAGE_NAMESPACE}}",
+  PROD_NAMESPACE: "${{PROD_NAMESPACE}}",
+  SECRET_ENABLED: "${{SECRET_ENABLED}}",
+  XID_ARRAY: "${{XID_ARRAY}}",
+  APPROVER: "${{APPROVER}}",
+  NOTIFY_EMAIL: "${{NOTIFY_EMAIL}}",
+  ENABLE_NOTIFICATIONS: "${{ENABLE_NOTIFICATIONS}}",
+  SNS_TOPIC_ARN: "${{SNS_TOPIC_ARN}}"
+])
+    </script>
+    <sandbox>true</sandbox>
+  </definition>
+</flow-definition>
+"""
+
+    job_url = f"{JENKINS_URL}/job/{job_name}/api/json"
+    job_check = requests.get(job_url, auth=(JENKINS_USER, JENKINS_TOKEN), verify=False)
+    if job_check.status_code == 200:
+        config_response = jenkins_post(
+            f"{JENKINS_URL}/job/{job_name}/config.xml",
+            content_type="application/xml",
+            data=job_config,
+        )
+        create_status = "updated"
+        create_response_code = config_response.status_code
+    else:
+        create_response = jenkins_post(
+            f"{JENKINS_URL}/createItem?name={job_name}",
+            content_type="application/xml",
+            data=job_config,
+        )
+        create_status = "created"
+        create_response_code = create_response.status_code
+
+    build_response = jenkins_post(
+        f"{JENKINS_URL}/job/{job_name}/buildWithParameters",
+        params=values,
+    )
+
+    return {
+        "status": f"Prod Devops pipeline {create_status} and triggered",
+        "project_name": request.project_name,
+        "job_name": job_name,
         "license": license_summary_doc,
         "create_response_code": create_response_code,
         "build_response_code": build_response.status_code,
@@ -643,7 +1275,7 @@ def trigger_existing_pipeline(request: TriggerRequest):
     if job_check.status_code != 200:
         return {"status": "Job not found", "message": f"Pipeline '{request.project_name}' does not exist."}
     build_url = f"{JENKINS_URL}/job/{request.project_name}/build"
-    build_trigger = requests.post(build_url, auth=(JENKINS_USER, JENKINS_TOKEN), verify=False)
+    build_trigger = requests.post(build_url, headers=jenkins_headers(), auth=(JENKINS_USER, JENKINS_TOKEN), verify=False)
     return {"status": "Build triggered", "project_name": request.project_name, "code": build_trigger.status_code}
 
 @app.get("/pipeline/logs/{job_name}/{build_number}")
@@ -780,7 +1412,7 @@ async def upload_opa_risks(payload: OPARiskUpload, db: Session = Depends(get_db)
                 fixed_version=risk.remediation or "Review policy",
                 risk_score=risk.risk_score,
                 description=risk.description or risk.violation,
-                source=risk.source or "OPA", 
+                source=normalize_security_category(risk.source or "Policy Violation", risk.package_name, risk.violation),
                 jenkins_job=risk.jenkins_job,
                 build_number=risk.build_number,
                 jenkins_url=risk.jenkins_url,
@@ -815,10 +1447,21 @@ def get_dynamic_fix(violation: str) -> str:
 
 SECURITY_CATEGORY_BY_SOURCE = {
     "TRIVY": "Container Vulnerability",
+    "TRIVY-FILESYSTEM": "Dependency Vulnerability",
+    "TRIVY-MISCONFIGURATION": "IaC Misconfiguration",
+    "TRIVY-IAC": "IaC Misconfiguration",
+    "TRIVY-SECRET": "Secret Exposure",
+    "DEPENDENCY VULNERABILITY": "Dependency Vulnerability",
+    "CONTAINER VULNERABILITY": "Container Vulnerability",
+    "IAC MISCONFIGURATION": "IaC Misconfiguration",
+    "SECRET EXPOSURE": "Secret Exposure",
     "SONARQUBE": "Code Security Finding",
+    "CODE SECURITY FINDING": "Code Security Finding",
     "OPA": "Policy Violation",
     "OPA-KUBERNETES": "Policy Violation",
+    "POLICY VIOLATION": "Policy Violation",
     "CHECKMARX": "Static Code Security Finding",
+    "STATIC CODE SECURITY FINDING": "Static Code Security Finding",
 }
 
 def normalize_security_category(source: Optional[str], package_name: Optional[str], vulnerability_id: Optional[str]) -> str:
@@ -827,6 +1470,10 @@ def normalize_security_category(source: Optional[str], package_name: Optional[st
         return SECURITY_CATEGORY_BY_SOURCE[source_key]
     if (package_name or "").lower().endswith("policy") or "policy" in (vulnerability_id or "").lower():
         return "Policy Violation"
+    if "secret" in (package_name or "").lower() or "secret" in (vulnerability_id or "").lower():
+        return "Secret Exposure"
+    if "misconfig" in (vulnerability_id or "").lower() or "avd-" in (vulnerability_id or "").lower():
+        return "IaC Misconfiguration"
     return "Security Finding"
 
 def normalize_remediation(v: Vulnerability) -> str:
@@ -929,7 +1576,7 @@ def upload_vulnerabilities(payload: UploadPayload, db: Session = Depends(get_db)
                 fixed_version=v.fixed_version,
                 risk_score=v.risk_score,
                 description=v.description,
-                source=v.source,
+                source=normalize_security_category(v.source, v.package_name, v.vulnerability_id),
                 timestamp=datetime.utcnow(),
                 line=v.line,
                 rule=v.rule,
@@ -1004,7 +1651,7 @@ async def github_webhook(
             "ENABLE_TRIVY": "true"
         }
 
-        response = requests.post(jenkins_url, auth=(JENKINS_USER, JENKINS_TOKEN), params=params, verify=False)
+        response = requests.post(jenkins_url, headers=jenkins_headers(), auth=(JENKINS_USER, JENKINS_TOKEN), params=params, verify=False)
 
         return {
             "status": "Triggered Jenkins job",
@@ -1222,7 +1869,7 @@ async def github_webhook(
 #     # Create job
 #     create_response = requests.post(
 #         f"{JENKINS_URL}/createItem?name={request.project_name}",
-#         headers={"Content-Type": "application/xml"},
+#         headers=jenkins_headers("application/xml"),
 #         auth=(JENKINS_USER, JENKINS_TOKEN),
 #         data=job_config,
 #         verify=False
@@ -1305,7 +1952,7 @@ async def github_webhook(
 
 # #     create_response = requests.post(
 # #         f"{JENKINS_URL}/createItem?name={request.project_name}",
-# #         headers={"Content-Type": "application/xml"},
+# #         headers=jenkins_headers("application/xml"),
 # #         auth=(JENKINS_USER, JENKINS_TOKEN),
 # #         data=job_config,
 # #         verify=False
@@ -1345,7 +1992,7 @@ async def github_webhook(
 #         }
 
 #     build_url = f"{JENKINS_URL}/job/{request.project_name}/build"
-#     build_trigger = requests.post(build_url, auth=(JENKINS_USER, JENKINS_TOKEN), verify=False)
+#     build_trigger = requests.post(build_url, headers=jenkins_headers(), auth=(JENKINS_USER, JENKINS_TOKEN), verify=False)
 
 #     if build_trigger.status_code in [200, 201]:
 #         return {
