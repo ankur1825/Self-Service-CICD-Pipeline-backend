@@ -3,19 +3,21 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from datetime import datetime
 import os
 import requests
 from ldap3 import Server, Connection, ALL, SUBTREE
+from ldap3.utils.conv import escape_filter_chars
 import logging
 import json
 import hmac
 import hashlib
+import re
 from html import escape
 
 from database import SessionLocal, engine, Base
-from models import Application, ApplicationUserAccess, Vulnerability
+from models import Application, ApplicationUserAccess, Vulnerability, EnvironmentCatalog
 from enterprise.licensing import (
     LicenseValidationError,
     default_license_from_env,
@@ -87,6 +89,15 @@ def jenkins_post(url: str, content_type: Optional[str] = None, data=None, params
 # GitHub webhook secret
 GITHUB_WEBHOOK_SECRET = os.environ["GITHUB_WEBHOOK_SECRET"]
 
+def aws_account_id_from_registry(registry: Optional[str]) -> Optional[str]:
+    if not registry:
+        return None
+    registry_value = registry.strip()
+    if re.fullmatch(r"[0-9]{12}", registry_value):
+        return registry_value
+    match = re.search(r"([0-9]{12})\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com", registry_value)
+    return match.group(1) if match else None
+
 # LDAP configuration
 LDAP_SERVER = os.getenv("LDAP_SERVER", "ldap://openldap.horizon-relevance-dev.svc.cluster.local:389")
 LDAP_USER = os.getenv("LDAP_USER", "cn=admin,dc=horizonrelevance,dc=local")
@@ -96,6 +107,13 @@ SEARCH_FILTER = os.getenv("LDAP_SEARCH_FILTER", "(objectClass=inetOrgPerson)")
 LDAP_UID_ATTRIBUTE = os.getenv("LDAP_UID_ATTRIBUTE", "uid")
 LDAP_DISPLAY_NAME_ATTRIBUTE = os.getenv("LDAP_DISPLAY_NAME_ATTRIBUTE", "displayName")
 LDAP_MAIL_ATTRIBUTE = os.getenv("LDAP_MAIL_ATTRIBUTE", "mail")
+LDAP_GROUP_BASE_DN = os.getenv("LDAP_GROUP_BASE_DN", "ou=groups,dc=horizonrelevance,dc=local")
+LDAP_GROUP_SEARCH_FILTER = os.getenv("LDAP_GROUP_SEARCH_FILTER", "(objectClass=groupOfNames)")
+LDAP_GROUP_MEMBER_ATTRIBUTE = os.getenv("LDAP_GROUP_MEMBER_ATTRIBUTE", "member")
+LDAP_GROUP_NAME_ATTRIBUTE = os.getenv("LDAP_GROUP_NAME_ATTRIBUTE", "cn")
+LDAP_USER_GROUP_ATTRIBUTE = os.getenv("LDAP_USER_GROUP_ATTRIBUTE", "memberOf")
+LDAP_ROLE_GROUP_MAPPINGS_RAW = os.getenv("LDAP_ROLE_GROUP_MAPPINGS", "{}")
+ENVIRONMENT_CATALOG_FILE = os.getenv("ENVIRONMENT_CATALOG_FILE", "/app/config/environment-catalog.json")
 
 # CORS setup for frontend
 app.add_middleware(
@@ -135,6 +153,8 @@ class DevopsPipelineRequest(BaseModel):
     enabled_pipelines: Optional[List[str]] = None
     enabled_features: Optional[List[str]] = None
     allowed_environments: Optional[List[str]] = None
+    allowed_aws_account_ids: Optional[List[str]] = None
+    installation_id: Optional[str] = None
     project_name: str
     project_type: str
     repo_type: str
@@ -150,12 +170,13 @@ class DevopsPipelineRequest(BaseModel):
     ENABLE_RESTASSURED: bool = False
     ENABLE_UFT: bool = False
     ENABLE_TRIVY: bool = False
-    target_env: str = "EKS-NONPROD"
+    target_env: str = "DEV"
     notify_email: Optional[str] = None
-    aws_region: str = "us-east-1"
-    ecr_registry: str
-    ecr_repository: str
-    artifact_bucket: str
+    additional_notify_emails: Optional[str] = None
+    aws_region: Optional[str] = None
+    ecr_registry: Optional[str] = None
+    ecr_repository: Optional[str] = None
+    artifact_bucket: Optional[str] = None
     client_aws_role_arn: Optional[str] = None
     nonprod_aws_role_arn: Optional[str] = None
     target_aws_role_arn: Optional[str] = None
@@ -183,6 +204,8 @@ class TestDevopsPipelineRequest(BaseModel):
     enabled_pipelines: Optional[List[str]] = None
     enabled_features: Optional[List[str]] = None
     allowed_environments: Optional[List[str]] = None
+    allowed_aws_account_ids: Optional[List[str]] = None
+    installation_id: Optional[str] = None
     project_name: str
     project_type: str
     repo_type: str = "GitHub"
@@ -216,6 +239,7 @@ class TestDevopsPipelineRequest(BaseModel):
     newman_fail_on_error: bool = True
     target_env: str = "QA"
     notify_email: Optional[str] = None
+    additional_notify_emails: Optional[str] = None
     aws_region: str = "us-east-1"
     artifact_bucket: Optional[str] = None
     client_aws_role_arn: Optional[str] = None
@@ -235,18 +259,20 @@ class ProdDevopsPipelineRequest(BaseModel):
     enabled_pipelines: Optional[List[str]] = None
     enabled_features: Optional[List[str]] = None
     allowed_environments: Optional[List[str]] = None
+    allowed_aws_account_ids: Optional[List[str]] = None
+    installation_id: Optional[str] = None
     project_name: str
-    artifact_bucket: str
+    artifact_bucket: Optional[str] = None
     artifact_prefix: str
     image_json_path: Optional[str] = None
     template_config_path: Optional[str] = None
     source_env: str = "STAGE"
-    target_env: str = "EKS-PROD"
+    target_env: str = "PROD"
     aws_region: str = "us-east-1"
-    source_ecr_registry: str
-    source_ecr_repository: str
-    target_ecr_registry: str
-    target_ecr_repository: str
+    source_ecr_registry: Optional[str] = None
+    source_ecr_repository: Optional[str] = None
+    target_ecr_registry: Optional[str] = None
+    target_ecr_repository: Optional[str] = None
     source_image_tag: Optional[str] = None
     target_image_tag: str = "prod"
     client_aws_role_arn: Optional[str] = None
@@ -266,6 +292,7 @@ class ProdDevopsPipelineRequest(BaseModel):
     xid_array: Optional[str] = None
     approver: Optional[str] = None
     notify_email: Optional[str] = None
+    additional_notify_emails: Optional[str] = None
     enable_notifications: bool = False
     sns_topic_arn: Optional[str] = None
 
@@ -279,12 +306,36 @@ class LicenseValidationRequest(BaseModel):
     enabled_pipelines: Optional[List[str]] = None
     enabled_features: Optional[List[str]] = None
     allowed_environments: Optional[List[str]] = None
+    allowed_aws_account_ids: Optional[List[str]] = None
+    installation_id: Optional[str] = None
     pipeline_name: str = "Devops Pipeline"
     target_env: str = "EKS-NONPROD"
     requested_features: List[str] = []
 
 class LicenseSyncRequest(BaseModel):
     force: Optional[bool] = False
+
+class EnvironmentCatalogEntryRequest(BaseModel):
+    name: str
+    display_name: Optional[str] = None
+    account_tier: Optional[str] = None
+    aws_account_id: Optional[str] = None
+    aws_region: Optional[str] = "us-east-1"
+    ecr_registry: Optional[str] = None
+    ecr_repository_template: Optional[str] = None
+    artifact_bucket: Optional[str] = None
+    client_aws_role_arn: Optional[str] = None
+    nonprod_aws_role_arn: Optional[str] = None
+    source_aws_role_arn: Optional[str] = None
+    target_aws_role_arn: Optional[str] = None
+    cluster_name: Optional[str] = None
+    namespace_strategy: Optional[str] = "auto"
+    namespace_template: Optional[str] = "{client_id}-{project_name}-{env}"
+    sns_topic_arn: Optional[str] = None
+    is_active: bool = True
+
+class EnvironmentCatalogRequest(BaseModel):
+    environments: List[EnvironmentCatalogEntryRequest]
 
 class TriggerRequest(BaseModel):
     project_name: str
@@ -375,7 +426,7 @@ def requested_test_devops_features(request: TestDevopsPipelineRequest) -> List[s
         features.append("policy_scan")
     if request.ENABLE_CHECKMARX:
         features.append("static_application_security")
-    if request.ENABLE_SOAPUI or request.ENABLE_JMETER or request.ENABLE_SELENIUM or request.ENABLE_NEWMAN or request.ENABLE_RESTASSURED or request.ENABLE_UFT:
+    if request.ENABLE_JMETER or request.ENABLE_SELENIUM or request.ENABLE_NEWMAN:
         features.append("test_suites")
     if request.enable_notifications:
         features.append("notifications")
@@ -388,6 +439,272 @@ def requested_prod_devops_features(request: ProdDevopsPipelineRequest) -> List[s
     if request.enable_notifications:
         features.append("notifications")
     return features
+
+ENVIRONMENT_ALIASES = {
+    "EKS-NONPROD": "DEV",
+    "EKS-PROD": "PROD",
+}
+
+def parse_ldap_role_group_mappings(raw: str) -> Dict[str, set]:
+    if not raw:
+        return {}
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        logger.warning("Invalid LDAP_ROLE_GROUP_MAPPINGS JSON: %s", exc)
+        return {}
+
+    normalized = {}
+    if isinstance(payload, dict):
+        iterable = payload.items()
+    elif isinstance(payload, list):
+        iterable = ((item.get("role"), item.get("groups")) for item in payload if isinstance(item, dict))
+    else:
+        return {}
+
+    for role, groups in iterable:
+        role_name = str(role or "").strip()
+        if not role_name:
+            continue
+        if isinstance(groups, str):
+            groups = [groups]
+        if not isinstance(groups, list):
+            continue
+        normalized[role_name] = {str(group).strip().lower() for group in groups if str(group).strip()}
+    return normalized
+
+
+LDAP_ROLE_GROUP_MAPPINGS = parse_ldap_role_group_mappings(LDAP_ROLE_GROUP_MAPPINGS_RAW)
+
+
+def cn_from_dn(dn: str) -> Optional[str]:
+    match = re.search(r"(?i)(?:^|,)\s*cn=([^,]+)", dn or "")
+    return match.group(1).replace("\\,", ",").strip() if match else None
+
+
+def ldap_entry_values(entry, attribute: str) -> List[str]:
+    if not attribute or attribute not in entry:
+        return []
+    value = entry[attribute]
+    if hasattr(value, "values"):
+        return [str(item) for item in value.values]
+    return [str(value)]
+
+
+def resolve_ldap_groups(search_conn: Connection, user_entry, user_dn: str) -> List[str]:
+    groups = set()
+
+    for member_group in ldap_entry_values(user_entry, LDAP_USER_GROUP_ATTRIBUTE):
+        groups.add(member_group)
+        group_cn = cn_from_dn(member_group)
+        if group_cn:
+            groups.add(group_cn)
+
+    try:
+        search_conn.search(
+            search_base=LDAP_GROUP_BASE_DN,
+            search_filter=f"(&{LDAP_GROUP_SEARCH_FILTER}({LDAP_GROUP_MEMBER_ATTRIBUTE}={escape_filter_chars(user_dn)}))",
+            search_scope=SUBTREE,
+            attributes=[LDAP_GROUP_NAME_ATTRIBUTE],
+        )
+        for entry in search_conn.entries:
+            groups.add(str(entry.entry_dn))
+            for group_name in ldap_entry_values(entry, LDAP_GROUP_NAME_ATTRIBUTE):
+                groups.add(group_name)
+    except Exception as group_exc:
+        logger.warning("Unable to resolve LDAP groups for %s: %s", user_dn, group_exc)
+
+    return sorted(groups)
+
+
+def resolve_roles_from_ldap_groups(groups: List[str]) -> List[str]:
+    normalized_groups = {str(group).strip().lower() for group in groups if str(group).strip()}
+    roles = sorted([
+        role for role, allowed_groups in LDAP_ROLE_GROUP_MAPPINGS.items()
+        if normalized_groups.intersection(allowed_groups)
+    ])
+    return roles or ["viewer"]
+
+
+def normalize_environment_name(value: Optional[str]) -> str:
+    env = (value or "DEV").strip().upper()
+    return ENVIRONMENT_ALIASES.get(env, env)
+
+
+def slugify_value(value: str) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9._/-]+", "-", (value or "").strip()).strip("-._/")
+    return (slug or "application").lower()
+
+
+def render_catalog_template(value: Optional[str], project_name: str, client_id: str, env: str) -> str:
+    if not value:
+        return ""
+    project_slug = slugify_value(project_name)
+    client_slug = slugify_value(client_id or "client")
+    return (
+        value.replace("{project_name}", project_slug)
+        .replace("{client_id}", client_slug)
+        .replace("{env}", env.lower())
+        .replace("{ENV}", env.upper())
+    )
+
+
+def catalog_entry_to_dict(entry: EnvironmentCatalog) -> Dict[str, Any]:
+    return {
+        "name": entry.name,
+        "display_name": entry.display_name or entry.name,
+        "account_tier": entry.account_tier or "nonprod",
+        "aws_account_id": entry.aws_account_id or "",
+        "aws_region": entry.aws_region or "us-east-1",
+        "ecr_registry": entry.ecr_registry or "",
+        "ecr_repository_template": entry.ecr_repository_template or "{project_name}",
+        "artifact_bucket": entry.artifact_bucket or "",
+        "client_aws_role_arn": entry.client_aws_role_arn or "",
+        "nonprod_aws_role_arn": entry.nonprod_aws_role_arn or "",
+        "source_aws_role_arn": entry.source_aws_role_arn or "",
+        "target_aws_role_arn": entry.target_aws_role_arn or "",
+        "cluster_name": entry.cluster_name or "",
+        "namespace_strategy": entry.namespace_strategy or "auto",
+        "namespace_template": entry.namespace_template or "{client_id}-{project_name}-{env}",
+        "sns_topic_arn": entry.sns_topic_arn or "",
+        "is_active": bool(entry.is_active),
+        "updated_at": entry.updated_at.isoformat() if entry.updated_at else None,
+    }
+
+
+def load_environment_catalog_seed() -> List[Dict[str, Any]]:
+    if ENVIRONMENT_CATALOG_FILE and os.path.exists(ENVIRONMENT_CATALOG_FILE):
+        with open(ENVIRONMENT_CATALOG_FILE, "r", encoding="utf-8") as catalog_file:
+            payload = json.load(catalog_file)
+        if isinstance(payload, list):
+            return payload
+        if isinstance(payload, dict):
+            return payload.get("environments") or []
+    return [
+        {"name": "DEV", "display_name": "Development", "account_tier": "nonprod"},
+        {"name": "QA", "display_name": "Quality Assurance", "account_tier": "nonprod"},
+        {"name": "STAGE", "display_name": "Stage", "account_tier": "nonprod"},
+        {"name": "PROD", "display_name": "Production", "account_tier": "prod"},
+    ]
+
+
+def upsert_environment_catalog_entry(db: Session, raw: Dict[str, Any]) -> EnvironmentCatalog:
+    env_name = normalize_environment_name(raw.get("name"))
+    entry = db.query(EnvironmentCatalog).filter(EnvironmentCatalog.name == env_name).first()
+    if not entry:
+        entry = EnvironmentCatalog(name=env_name)
+        db.add(entry)
+    allowed_fields = [
+        "display_name", "account_tier", "aws_account_id", "aws_region", "ecr_registry",
+        "ecr_repository_template", "artifact_bucket", "client_aws_role_arn", "nonprod_aws_role_arn",
+        "source_aws_role_arn", "target_aws_role_arn", "cluster_name", "namespace_strategy",
+        "namespace_template", "sns_topic_arn",
+    ]
+    for field in allowed_fields:
+        value = raw.get(field)
+        if value is not None:
+            setattr(entry, field, str(value).strip())
+    entry.is_active = 1 if raw.get("is_active", True) else 0
+    entry.updated_at = datetime.utcnow()
+    return entry
+
+
+def ensure_environment_catalog_seeded(db: Session) -> None:
+    if db.query(EnvironmentCatalog).count() > 0:
+        return
+    for raw in load_environment_catalog_seed():
+        upsert_environment_catalog_entry(db, raw)
+    db.commit()
+
+
+def resolve_environment_catalog_values(db: Session, target_env: str, project_name: str, request: Optional[BaseModel] = None):
+    env = normalize_environment_name(target_env)
+    ensure_environment_catalog_seeded(db)
+    entry = db.query(EnvironmentCatalog).filter(EnvironmentCatalog.name == env, EnvironmentCatalog.is_active == 1).first()
+    if not entry:
+        return None, f"Environment catalog entry '{env}' is not configured or inactive. Ask a platform admin to configure Environment Catalog."
+
+    catalog = catalog_entry_to_dict(entry)
+    request_values = request.dict() if request else {}
+
+    def request_value(name: str) -> str:
+        value = request_values.get(name)
+        return str(value).strip() if value is not None else ""
+
+    def resolved(name: str, fallback: str = "") -> str:
+        catalog_value = str(catalog.get(name) or "").strip()
+        return catalog_value or request_value(name) or fallback
+
+    license_doc = merge_request_license(request_values)
+    client_id = str(license_doc.get("client_id") or request_value("client_id") or "client").strip()
+    repository_template = resolved("ecr_repository_template", "{project_name}")
+    namespace_template = resolved("namespace_template", "{client_id}-{project_name}-{env}")
+    namespace_strategy = resolved("namespace_strategy", request_value("namespace_strategy") or "auto")
+    manual_namespace = request_value("app_namespace")
+    namespace = manual_namespace if namespace_strategy == "manual" and manual_namespace else render_catalog_template(namespace_template, project_name, client_id, env)
+    cluster_name = resolved("cluster_name", request_value(f"{env.lower()}_cluster_name"))
+    client_role = resolved("client_aws_role_arn")
+    nonprod_role = resolved("nonprod_aws_role_arn", client_role)
+    source_role = resolved("source_aws_role_arn", nonprod_role or client_role)
+    target_role = resolved("target_aws_role_arn", nonprod_role or client_role)
+    ecr_registry = resolved("ecr_registry", resolved("aws_account_id"))
+
+    clusters = {"DEV": "", "QA": "", "STAGE": "", "PROD": ""}
+    namespaces = {"DEV": "", "QA": "", "STAGE": "", "PROD": ""}
+    if env in clusters:
+        clusters[env] = cluster_name
+        namespaces[env] = namespace
+
+    return {
+        "TARGET_ENV": env,
+        "AWS_REGION": resolved("aws_region", "us-east-1"),
+        "AWS_ACCOUNT_ID": resolved("aws_account_id", aws_account_id_from_registry(ecr_registry) or ""),
+        "ECR_REGISTRY": ecr_registry,
+        "ECR_REPOSITORY": render_catalog_template(repository_template, project_name, client_id, env),
+        "ARTIFACT_BUCKET": resolved("artifact_bucket"),
+        "CLIENT_AWS_ROLE_ARN": client_role,
+        "NONPROD_AWS_ROLE_ARN": nonprod_role,
+        "SOURCE_AWS_ROLE_ARN": source_role,
+        "TARGET_AWS_ROLE_ARN": target_role,
+        "DEV_CLUSTER_NAME": clusters["DEV"] or request_value("dev_cluster_name"),
+        "QA_CLUSTER_NAME": clusters["QA"] or request_value("qa_cluster_name"),
+        "STAGE_CLUSTER_NAME": clusters["STAGE"] or request_value("stage_cluster_name"),
+        "PROD_CLUSTER_NAME": clusters["PROD"] or request_value("prod_cluster_name"),
+        "NAMESPACE_STRATEGY": namespace_strategy,
+        "APP_NAMESPACE": namespace,
+        "DEV_NAMESPACE": namespaces["DEV"] or request_value("dev_namespace"),
+        "QA_NAMESPACE": namespaces["QA"] or request_value("qa_namespace"),
+        "STAGE_NAMESPACE": namespaces["STAGE"] or request_value("stage_namespace"),
+        "PROD_NAMESPACE": namespaces["PROD"] or request_value("prod_namespace"),
+        "SNS_TOPIC_ARN": resolved("sns_topic_arn", request_value("sns_topic_arn")),
+        "catalog": catalog,
+    }, None
+
+
+@app.get("/environment-catalog")
+def get_environment_catalog(db: Session = Depends(get_db)):
+    ensure_environment_catalog_seeded(db)
+    entries = db.query(EnvironmentCatalog).order_by(EnvironmentCatalog.name.asc()).all()
+    return {"environments": [catalog_entry_to_dict(entry) for entry in entries]}
+
+
+@app.get("/environment-catalog/resolve/{target_env}")
+def resolve_environment_catalog(target_env: str, project_name: str = "application", db: Session = Depends(get_db)):
+    resolved, error = resolve_environment_catalog_values(db, target_env, project_name)
+    if error:
+        return JSONResponse(status_code=404, content={"error": error})
+    return resolved
+
+
+@app.post("/environment-catalog")
+def save_environment_catalog(request: EnvironmentCatalogRequest, db: Session = Depends(get_db)):
+    if not request.environments:
+        return JSONResponse(status_code=400, content={"error": "At least one environment is required"})
+    for environment in request.environments:
+        upsert_environment_catalog_entry(db, environment.dict())
+    db.commit()
+    entries = db.query(EnvironmentCatalog).order_by(EnvironmentCatalog.name.asc()).all()
+    return {"status": "saved", "environments": [catalog_entry_to_dict(entry) for entry in entries]}
 
 @app.get("/license/status")
 def get_license_status():
@@ -505,25 +822,29 @@ async def login(request: Request):
         search_conn = Connection(server, user=LDAP_USER, password=LDAP_PASSWORD, auto_bind=True)
         search_conn.search(
             search_base=LDAP_BASE_DN,
-            search_filter=f"({LDAP_UID_ATTRIBUTE}={username})",
+            search_filter=f"({LDAP_UID_ATTRIBUTE}={escape_filter_chars(username)})",
             search_scope=SUBTREE,
             attributes=[LDAP_DISPLAY_NAME_ATTRIBUTE, LDAP_MAIL_ATTRIBUTE, LDAP_UID_ATTRIBUTE]
         )
         if not search_conn.entries:
+            search_conn.unbind()
             return JSONResponse(status_code=401, content={"error": "User not found"})
 
         user_entry = search_conn.entries[0]
         user_dn = str(user_entry.entry_dn)
         display_name = str(user_entry[LDAP_DISPLAY_NAME_ATTRIBUTE]) if LDAP_DISPLAY_NAME_ATTRIBUTE in user_entry else username
         email = str(user_entry[LDAP_MAIL_ATTRIBUTE]) if LDAP_MAIL_ATTRIBUTE in user_entry else ""
+        groups = resolve_ldap_groups(search_conn, user_entry, user_dn)
         search_conn.unbind()
 
         auth_conn = Connection(server, user=user_dn, password=password, auto_bind=True)
         auth_conn.unbind()
 
-        return {"username": username, "fullName": display_name, "email": email}
+        roles = resolve_roles_from_ldap_groups(groups)
 
-    except Exception as e:
+        return {"username": username, "fullName": display_name, "email": email, "roles": roles}
+
+    except Exception:
         return JSONResponse(status_code=401, content={"error": "Invalid credentials or server error"})
 
 @app.get("/get_ldap_users")
@@ -664,7 +985,7 @@ main_template([
     }
 
 @app.post("/devops/pipeline")
-def create_devops_pipeline(request: DevopsPipelineRequest):
+def create_devops_pipeline(request: DevopsPipelineRequest, db: Session = Depends(get_db)):
     allowed_project_types = {
         "Docker",
         "Angular",
@@ -676,40 +997,49 @@ def create_devops_pipeline(request: DevopsPipelineRequest):
     if request.project_type not in allowed_project_types:
         return JSONResponse(
             status_code=400,
-            content={
-                "error": "Unsupported project_type",
-                "supported_project_types": sorted(allowed_project_types),
-            },
+            content={"error": "Unsupported project_type", "supported_project_types": sorted(allowed_project_types)},
         )
 
     job_name = request.project_name.strip()
     if not job_name:
         return JSONResponse(status_code=400, content={"error": "project_name is required"})
 
+    env_values, env_error = resolve_environment_catalog_values(db, request.target_env, job_name, request)
+    if env_error:
+        return JSONResponse(status_code=400, content={"error": env_error, "status": "environment_catalog_missing"})
+
+    missing_catalog_fields = [field for field in ["AWS_REGION", "ECR_REGISTRY", "ECR_REPOSITORY", "ARTIFACT_BUCKET"] if not env_values.get(field)]
+    if missing_catalog_fields:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "Environment Catalog is missing required deployment settings.",
+                "missing_fields": missing_catalog_fields,
+                "target_env": env_values["TARGET_ENV"],
+            },
+        )
+
     license_doc = merge_request_license(request.dict())
     try:
         validated_license = validate_license(
             license_doc,
             pipeline_name="Devops Pipeline",
-            target_env=request.target_env,
+            target_env=env_values["TARGET_ENV"],
             requested_features=requested_devops_features(request),
+            aws_account_id=env_values.get("AWS_ACCOUNT_ID") or aws_account_id_from_registry(env_values.get("ECR_REGISTRY")),
         )
     except LicenseValidationError as exc:
         return JSONResponse(status_code=403, content={"error": str(exc), "status": "license_denied"})
 
     license_summary_doc = license_summary(validated_license)
-    enabled_pipelines = ",".join(validated_license.get("enabled_pipelines") or [])
-    enabled_features = ",".join(validated_license.get("enabled_features") or [])
-    allowed_environments = ",".join(validated_license.get("allowed_environments") or [])
-
     values = {
         "CLIENT_ID": str(validated_license.get("client_id") or "").strip(),
         "CLIENT_NAME": str(validated_license.get("client_name") or "").strip(),
         "LICENSE_TYPE": str(validated_license.get("license_type") or "").strip(),
         "LICENSE_EXPIRES_AT": str(validated_license.get("expires_at") or "").strip(),
-        "LICENSED_PIPELINES": enabled_pipelines,
-        "LICENSED_FEATURES": enabled_features,
-        "LICENSED_ENVIRONMENTS": allowed_environments,
+        "LICENSED_PIPELINES": ",".join(validated_license.get("enabled_pipelines") or []),
+        "LICENSED_FEATURES": ",".join(validated_license.get("enabled_features") or []),
+        "LICENSED_ENVIRONMENTS": ",".join(validated_license.get("allowed_environments") or []),
         "LICENSE_VALIDATION_MODE": str(validated_license.get("validation_mode") or "unknown"),
         "PROJECT_NAME": job_name,
         "PROJECT_TYPE": request.project_type,
@@ -731,83 +1061,36 @@ def create_devops_pipeline(request: DevopsPipelineRequest):
         "ENABLE_UFT": "false",
         "ENABLE_TRIVY": "false",
         "ENABLE_OPA": "false",
-        "TARGET_ENV": request.target_env,
+        "TARGET_ENV": env_values["TARGET_ENV"],
         "NOTIFY_EMAIL": (request.notify_email or "").strip(),
-        "AWS_REGION": request.aws_region.strip() or "us-east-1",
-        "ECR_REGISTRY": request.ecr_registry.strip(),
-        "ECR_REPOSITORY": request.ecr_repository.strip(),
-        "ARTIFACT_BUCKET": request.artifact_bucket.strip(),
-        "CLIENT_AWS_ROLE_ARN": (request.client_aws_role_arn or "").strip(),
-        "NONPROD_AWS_ROLE_ARN": (request.nonprod_aws_role_arn or request.client_aws_role_arn or "").strip(),
-        "TARGET_AWS_ROLE_ARN": (request.target_aws_role_arn or request.nonprod_aws_role_arn or request.client_aws_role_arn or "").strip(),
-        "DEV_CLUSTER_NAME": (request.dev_cluster_name or "").strip(),
-        "QA_CLUSTER_NAME": (request.qa_cluster_name or "").strip(),
-        "STAGE_CLUSTER_NAME": (request.stage_cluster_name or "").strip(),
-        "PROD_CLUSTER_NAME": (request.prod_cluster_name or "").strip(),
-        "NAMESPACE_STRATEGY": (request.namespace_strategy or "auto").strip(),
-        "APP_NAMESPACE": (request.app_namespace or "").strip(),
-        "DEV_NAMESPACE": (request.dev_namespace or "").strip(),
-        "QA_NAMESPACE": (request.qa_namespace or "").strip(),
-        "STAGE_NAMESPACE": (request.stage_namespace or "").strip(),
-        "PROD_NAMESPACE": (request.prod_namespace or "").strip(),
-        "ENABLE_NOTIFICATIONS": str(request.enable_notifications).lower(),
-        "SNS_TOPIC_ARN": (request.sns_topic_arn or "").strip(),
+        "NOTIFY_CC": (request.additional_notify_emails or "").strip(),
+        "AWS_REGION": env_values["AWS_REGION"],
+        "ECR_REGISTRY": env_values["ECR_REGISTRY"],
+        "ECR_REPOSITORY": env_values["ECR_REPOSITORY"],
+        "ARTIFACT_BUCKET": env_values["ARTIFACT_BUCKET"],
+        "CLIENT_AWS_ROLE_ARN": env_values["CLIENT_AWS_ROLE_ARN"],
+        "NONPROD_AWS_ROLE_ARN": env_values["NONPROD_AWS_ROLE_ARN"],
+        "TARGET_AWS_ROLE_ARN": env_values["TARGET_AWS_ROLE_ARN"],
+        "DEV_CLUSTER_NAME": env_values["DEV_CLUSTER_NAME"],
+        "QA_CLUSTER_NAME": env_values["QA_CLUSTER_NAME"],
+        "STAGE_CLUSTER_NAME": env_values["STAGE_CLUSTER_NAME"],
+        "PROD_CLUSTER_NAME": env_values["PROD_CLUSTER_NAME"],
+        "NAMESPACE_STRATEGY": env_values["NAMESPACE_STRATEGY"],
+        "APP_NAMESPACE": env_values["APP_NAMESPACE"],
+        "DEV_NAMESPACE": env_values["DEV_NAMESPACE"],
+        "QA_NAMESPACE": env_values["QA_NAMESPACE"],
+        "STAGE_NAMESPACE": env_values["STAGE_NAMESPACE"],
+        "PROD_NAMESPACE": env_values["PROD_NAMESPACE"],
+        "ENABLE_NOTIFICATIONS": str(bool(request.enable_notifications or (request.notify_email or "").strip() or (request.additional_notify_emails or "").strip())).lower(),
+        "SNS_TOPIC_ARN": env_values["SNS_TOPIC_ARN"],
     }
     xml_values = {k: escape(v, quote=True) for k, v in values.items()}
-
     bool_param_names = [
-        "ENABLE_SONARQUBE",
-        "ENABLE_CHECKMARX",
-        "ENABLE_SOAPUI",
-        "ENABLE_JMETER",
-        "ENABLE_SELENIUM",
-        "ENABLE_NEWMAN",
-        "ENABLE_RESTASSURED",
-        "ENABLE_UFT",
-        "ENABLE_TRIVY",
-        "ENABLE_OPA",
-        "ENABLE_NOTIFICATIONS",
+        "ENABLE_SONARQUBE", "ENABLE_CHECKMARX", "ENABLE_SOAPUI", "ENABLE_JMETER",
+        "ENABLE_SELENIUM", "ENABLE_NEWMAN", "ENABLE_RESTASSURED", "ENABLE_UFT",
+        "ENABLE_TRIVY", "ENABLE_OPA", "ENABLE_NOTIFICATIONS",
     ]
-    string_param_names = [
-        "CLIENT_ID",
-        "CLIENT_NAME",
-        "LICENSE_TYPE",
-        "LICENSE_EXPIRES_AT",
-        "LICENSED_PIPELINES",
-        "LICENSED_FEATURES",
-        "LICENSED_ENVIRONMENTS",
-        "LICENSE_VALIDATION_MODE",
-        "PROJECT_NAME",
-        "PROJECT_TYPE",
-        "REPO_TYPE",
-        "REPO_URL",
-        "BRANCH",
-        "CREDENTIALS_ID",
-        "PIPELINE_KIND",
-        "SERVICE_NAME",
-        "REQUESTED_BY",
-        "CHECKMARX_TEAM",
-        "TARGET_ENV",
-        "NOTIFY_EMAIL",
-        "AWS_REGION",
-        "ECR_REGISTRY",
-        "ECR_REPOSITORY",
-        "ARTIFACT_BUCKET",
-        "CLIENT_AWS_ROLE_ARN",
-        "NONPROD_AWS_ROLE_ARN",
-        "TARGET_AWS_ROLE_ARN",
-        "DEV_CLUSTER_NAME",
-        "QA_CLUSTER_NAME",
-        "STAGE_CLUSTER_NAME",
-        "PROD_CLUSTER_NAME",
-        "NAMESPACE_STRATEGY",
-        "APP_NAMESPACE",
-        "DEV_NAMESPACE",
-        "QA_NAMESPACE",
-        "STAGE_NAMESPACE",
-        "PROD_NAMESPACE",
-        "SNS_TOPIC_ARN",
-    ]
+    string_param_names = [name for name in values.keys() if name not in bool_param_names]
 
     parameter_definitions = []
     for name in string_param_names:
@@ -825,6 +1108,7 @@ def create_devops_pipeline(request: DevopsPipelineRequest):
           <description>{name}</description>
         </hudson.model.BooleanParameterDefinition>""")
 
+    params_map = "\n".join([f'  {name}: "${{{name}}}",' for name in values.keys()]).rstrip(',')
     job_config = f"""
 <flow-definition plugin="workflow-job">
   <description>Devops Pipeline for {xml_values["PROJECT_NAME"]}</description>
@@ -839,53 +1123,7 @@ def create_devops_pipeline(request: DevopsPipelineRequest):
     <script>
 @Library('jenkins-shared-library@main') _
 main_template([
-  CLIENT_ID: "${{CLIENT_ID}}",
-  CLIENT_NAME: "${{CLIENT_NAME}}",
-  LICENSE_TYPE: "${{LICENSE_TYPE}}",
-  LICENSE_EXPIRES_AT: "${{LICENSE_EXPIRES_AT}}",
-  LICENSED_PIPELINES: "${{LICENSED_PIPELINES}}",
-  LICENSED_FEATURES: "${{LICENSED_FEATURES}}",
-  LICENSED_ENVIRONMENTS: "${{LICENSED_ENVIRONMENTS}}",
-  LICENSE_VALIDATION_MODE: "${{LICENSE_VALIDATION_MODE}}",
-  PROJECT_NAME: "${{PROJECT_NAME}}",
-  PROJECT_TYPE: "${{PROJECT_TYPE}}",
-  REPO_TYPE: "${{REPO_TYPE}}",
-  REPO_URL: "${{REPO_URL}}",
-  BRANCH: "${{BRANCH}}",
-  CREDENTIALS_ID: "${{CREDENTIALS_ID}}",
-  PIPELINE_KIND: "${{PIPELINE_KIND}}",
-  SERVICE_NAME: "${{SERVICE_NAME}}",
-  REQUESTED_BY: "${{REQUESTED_BY}}",
-  ENABLE_SONARQUBE: "${{ENABLE_SONARQUBE}}",
-  ENABLE_CHECKMARX: "${{ENABLE_CHECKMARX}}",
-  CHECKMARX_TEAM: "${{CHECKMARX_TEAM}}",
-  ENABLE_SOAPUI: "${{ENABLE_SOAPUI}}",
-  ENABLE_JMETER: "${{ENABLE_JMETER}}",
-  ENABLE_SELENIUM: "${{ENABLE_SELENIUM}}",
-  ENABLE_NEWMAN: "${{ENABLE_NEWMAN}}",
-  ENABLE_TRIVY: "${{ENABLE_TRIVY}}",
-  ENABLE_OPA: "${{ENABLE_OPA}}",
-  TARGET_ENV: "${{TARGET_ENV}}",
-  NOTIFY_EMAIL: "${{NOTIFY_EMAIL}}",
-  AWS_REGION: "${{AWS_REGION}}",
-  ECR_REGISTRY: "${{ECR_REGISTRY}}",
-  ECR_REPOSITORY: "${{ECR_REPOSITORY}}",
-  ARTIFACT_BUCKET: "${{ARTIFACT_BUCKET}}",
-  CLIENT_AWS_ROLE_ARN: "${{CLIENT_AWS_ROLE_ARN}}",
-  NONPROD_AWS_ROLE_ARN: "${{NONPROD_AWS_ROLE_ARN}}",
-  TARGET_AWS_ROLE_ARN: "${{TARGET_AWS_ROLE_ARN}}",
-  DEV_CLUSTER_NAME: "${{DEV_CLUSTER_NAME}}",
-  QA_CLUSTER_NAME: "${{QA_CLUSTER_NAME}}",
-  STAGE_CLUSTER_NAME: "${{STAGE_CLUSTER_NAME}}",
-  PROD_CLUSTER_NAME: "${{PROD_CLUSTER_NAME}}",
-  NAMESPACE_STRATEGY: "${{NAMESPACE_STRATEGY}}",
-  APP_NAMESPACE: "${{APP_NAMESPACE}}",
-  DEV_NAMESPACE: "${{DEV_NAMESPACE}}",
-  QA_NAMESPACE: "${{QA_NAMESPACE}}",
-  STAGE_NAMESPACE: "${{STAGE_NAMESPACE}}",
-  PROD_NAMESPACE: "${{PROD_NAMESPACE}}",
-  ENABLE_NOTIFICATIONS: "${{ENABLE_NOTIFICATIONS}}",
-  SNS_TOPIC_ARN: "${{SNS_TOPIC_ARN}}"
+{params_map}
 ])
     </script>
     <sandbox>true</sandbox>
@@ -896,38 +1134,29 @@ main_template([
     job_url = f"{JENKINS_URL}/job/{job_name}/api/json"
     job_check = requests.get(job_url, auth=(JENKINS_USER, JENKINS_TOKEN), verify=False)
     if job_check.status_code == 200:
-        config_response = jenkins_post(
-            f"{JENKINS_URL}/job/{job_name}/config.xml",
-            content_type="application/xml",
-            data=job_config,
-        )
+        config_response = jenkins_post(f"{JENKINS_URL}/job/{job_name}/config.xml", content_type="application/xml", data=job_config)
         create_status = "updated"
         create_response_code = config_response.status_code
     else:
-        create_response = jenkins_post(
-            f"{JENKINS_URL}/createItem?name={job_name}",
-            content_type="application/xml",
-            data=job_config,
-        )
+        create_response = jenkins_post(f"{JENKINS_URL}/createItem?name={job_name}", content_type="application/xml", data=job_config)
         create_status = "created"
         create_response_code = create_response.status_code
 
-    build_response = jenkins_post(
-        f"{JENKINS_URL}/job/{job_name}/buildWithParameters",
-        params=values,
-    )
+    build_response = jenkins_post(f"{JENKINS_URL}/job/{job_name}/buildWithParameters", params=values)
 
     return {
         "status": f"Devops pipeline {create_status} and triggered",
         "project_name": job_name,
         "project_type": request.project_type,
+        "target_env": env_values["TARGET_ENV"],
+        "namespace": env_values["APP_NAMESPACE"],
         "license": license_summary_doc,
         "create_response_code": create_response_code,
         "build_response_code": build_response.status_code,
     }
 
 @app.post("/test/devops/pipeline")
-def create_test_devops_pipeline(request: TestDevopsPipelineRequest):
+def create_test_devops_pipeline(request: TestDevopsPipelineRequest, db: Session = Depends(get_db)):
     allowed_project_types = {
         "Docker",
         "Angular",
@@ -943,16 +1172,38 @@ def create_test_devops_pipeline(request: TestDevopsPipelineRequest):
     if not request.project_name.strip():
         return JSONResponse(status_code=400, content={"error": "project_name is required"})
 
+    env_values, env_error = resolve_environment_catalog_values(db, request.target_env, request.project_name.strip(), request)
+    if env_error:
+        return JSONResponse(status_code=400, content={"error": env_error, "status": "environment_catalog_missing"})
+
+    missing_catalog_fields = [field for field in ["AWS_REGION", "ARTIFACT_BUCKET", "CLIENT_AWS_ROLE_ARN"] if not env_values.get(field)]
+    if missing_catalog_fields:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "Environment Catalog is missing required test execution settings.",
+                "missing_fields": missing_catalog_fields,
+                "target_env": env_values["TARGET_ENV"],
+            },
+        )
+
     license_doc = merge_request_license(request.dict())
     try:
         validated_license = validate_license(
             license_doc,
             pipeline_name="Test Devops Pipeline",
-            target_env=request.target_env,
+            target_env=env_values["TARGET_ENV"],
             requested_features=requested_test_devops_features(request),
+            aws_account_id=aws_account_id_from_registry(request.image_uri or "") or env_values.get("AWS_ACCOUNT_ID"),
         )
     except LicenseValidationError as exc:
         return JSONResponse(status_code=403, content={"error": str(exc), "status": "license_denied"})
+
+    notification_requested = bool(
+        request.enable_notifications or
+        (request.notify_email or "").strip() or
+        (request.additional_notify_emails or "").strip()
+    )
 
     values = {
         "CLIENT_ID": str(validated_license.get("client_id") or "").strip(),
@@ -975,12 +1226,12 @@ def create_test_devops_pipeline(request: TestDevopsPipelineRequest):
         "ENABLE_SONARQUBE": str(request.ENABLE_SONARQUBE).lower(),
         "ENABLE_CHECKMARX": str(request.ENABLE_CHECKMARX).lower(),
         "CHECKMARX_TEAM": (request.checkmarx_team or "").strip(),
-        "ENABLE_SOAPUI": str(request.ENABLE_SOAPUI).lower(),
+        "ENABLE_SOAPUI": "false",
         "ENABLE_JMETER": str(request.ENABLE_JMETER).lower(),
         "ENABLE_SELENIUM": str(request.ENABLE_SELENIUM).lower(),
         "ENABLE_NEWMAN": str(request.ENABLE_NEWMAN).lower(),
-        "ENABLE_RESTASSURED": str(request.ENABLE_RESTASSURED).lower(),
-        "ENABLE_UFT": str(request.ENABLE_UFT).lower(),
+        "ENABLE_RESTASSURED": "false",
+        "ENABLE_UFT": "false",
         "ENABLE_TRIVY": str(request.ENABLE_TRIVY).lower(),
         "ENABLE_OPA": str(request.ENABLE_OPA).lower(),
         "IMAGE_URI": (request.image_uri or "").strip(),
@@ -999,15 +1250,16 @@ def create_test_devops_pipeline(request: TestDevopsPipelineRequest):
         "NEWMAN_DATA_FILE": (request.newman_data_file or "").strip(),
         "NEWMAN_TIMEOUT_MS": str(request.newman_timeout_ms or "30000").strip(),
         "NEWMAN_FAIL_ON_ERROR": str(request.newman_fail_on_error).lower(),
-        "TARGET_ENV": request.target_env.strip(),
+        "TARGET_ENV": env_values["TARGET_ENV"],
         "NOTIFY_EMAIL": (request.notify_email or "").strip(),
-        "AWS_REGION": request.aws_region.strip() or "us-east-1",
-        "ARTIFACT_BUCKET": (request.artifact_bucket or "").strip(),
-        "CLIENT_AWS_ROLE_ARN": (request.client_aws_role_arn or "").strip(),
-        "NONPROD_AWS_ROLE_ARN": (request.nonprod_aws_role_arn or request.client_aws_role_arn or "").strip(),
-        "TARGET_AWS_ROLE_ARN": (request.target_aws_role_arn or request.nonprod_aws_role_arn or request.client_aws_role_arn or "").strip(),
-        "ENABLE_NOTIFICATIONS": str(request.enable_notifications).lower(),
-        "SNS_TOPIC_ARN": (request.sns_topic_arn or "").strip(),
+        "NOTIFY_CC": (request.additional_notify_emails or "").strip(),
+        "AWS_REGION": env_values["AWS_REGION"],
+        "ARTIFACT_BUCKET": env_values["ARTIFACT_BUCKET"],
+        "CLIENT_AWS_ROLE_ARN": env_values["CLIENT_AWS_ROLE_ARN"],
+        "NONPROD_AWS_ROLE_ARN": env_values["NONPROD_AWS_ROLE_ARN"],
+        "TARGET_AWS_ROLE_ARN": env_values["TARGET_AWS_ROLE_ARN"],
+        "ENABLE_NOTIFICATIONS": str(notification_requested).lower(),
+        "SNS_TOPIC_ARN": env_values["SNS_TOPIC_ARN"],
     }
     xml_values = {k: escape(v, quote=True) for k, v in values.items()}
     bool_param_names = [
@@ -1080,20 +1332,47 @@ main_template([
     }
 
 @app.post("/prod/devops/pipeline")
-def create_prod_devops_pipeline(request: ProdDevopsPipelineRequest):
+def create_prod_devops_pipeline(request: ProdDevopsPipelineRequest, db: Session = Depends(get_db)):
     job_name = f"{request.project_name.strip()}-prod"
     if not request.project_name.strip():
         return JSONResponse(status_code=400, content={"error": "project_name is required"})
     if "PROD" not in (request.target_env or "").upper():
         return JSONResponse(status_code=400, content={"error": "Prod DevOps Pipeline only supports PROD target environments"})
 
+    source_env_values, source_env_error = resolve_environment_catalog_values(db, request.source_env, request.project_name.strip(), request)
+    if source_env_error:
+        return JSONResponse(status_code=400, content={"error": source_env_error, "status": "source_environment_catalog_missing"})
+    target_env_values, target_env_error = resolve_environment_catalog_values(db, request.target_env, request.project_name.strip(), request)
+    if target_env_error:
+        return JSONResponse(status_code=400, content={"error": target_env_error, "status": "target_environment_catalog_missing"})
+
+    missing_catalog_fields = [
+        field for field in ["ARTIFACT_BUCKET", "ECR_REGISTRY", "ECR_REPOSITORY", "SOURCE_AWS_ROLE_ARN"]
+        if not source_env_values.get(field)
+    ]
+    missing_catalog_fields += [
+        field for field in ["ECR_REGISTRY", "ECR_REPOSITORY", "TARGET_AWS_ROLE_ARN", "PROD_CLUSTER_NAME"]
+        if not target_env_values.get(field)
+    ]
+    if missing_catalog_fields:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "Environment Catalog is missing required production promotion settings.",
+                "missing_fields": sorted(set(missing_catalog_fields)),
+                "source_env": source_env_values["TARGET_ENV"],
+                "target_env": target_env_values["TARGET_ENV"],
+            },
+        )
+
     license_doc = merge_request_license(request.dict())
     try:
         validated_license = validate_license(
             license_doc,
             pipeline_name="Prod Devops Pipeline",
-            target_env=request.target_env,
+            target_env=target_env_values["TARGET_ENV"],
             requested_features=requested_prod_devops_features(request),
+            aws_account_id=target_env_values.get("AWS_ACCOUNT_ID") or aws_account_id_from_registry(target_env_values.get("ECR_REGISTRY")),
         )
     except LicenseValidationError as exc:
         return JSONResponse(status_code=403, content={"error": str(exc), "status": "license_denied"})
@@ -1102,6 +1381,11 @@ def create_prod_devops_pipeline(request: ProdDevopsPipelineRequest):
     artifact_prefix = request.artifact_prefix.strip().strip("/")
     image_json_path = (request.image_json_path or f"{artifact_prefix}/image.json").strip().lstrip("/")
     template_config_path = (request.template_config_path or f"{artifact_prefix}/templateconfiguration.json").strip().lstrip("/")
+    notification_requested = bool(
+        request.enable_notifications or
+        (request.notify_email or "").strip() or
+        (request.additional_notify_emails or "").strip()
+    )
 
     values = {
         "CLIENT_ID": str(validated_license.get("client_id") or "").strip(),
@@ -1116,38 +1400,39 @@ def create_prod_devops_pipeline(request: ProdDevopsPipelineRequest):
         "PIPELINE_KIND": "PROD_DEVOPS",
         "SERVICE_NAME": "Prod Devops Pipeline",
         "REQUESTED_BY": request.requestedBy,
-        "ARTIFACT_BUCKET": request.artifact_bucket.strip(),
+        "ARTIFACT_BUCKET": (request.artifact_bucket or source_env_values["ARTIFACT_BUCKET"]).strip(),
         "ARTIFACT_PREFIX": artifact_prefix,
         "IMAGE_JSON_PATH": image_json_path,
         "TEMPLATE_CONFIG_PATH": template_config_path,
-        "SOURCE_ENV": request.source_env.strip(),
-        "TARGET_ENV": request.target_env.strip(),
-        "AWS_REGION": request.aws_region.strip() or "us-east-1",
-        "SOURCE_ECR_REGISTRY": request.source_ecr_registry.strip(),
-        "SOURCE_ECR_REPOSITORY": request.source_ecr_repository.strip(),
-        "TARGET_ECR_REGISTRY": request.target_ecr_registry.strip(),
-        "TARGET_ECR_REPOSITORY": request.target_ecr_repository.strip(),
+        "SOURCE_ENV": source_env_values["TARGET_ENV"],
+        "TARGET_ENV": target_env_values["TARGET_ENV"],
+        "AWS_REGION": target_env_values["AWS_REGION"] or source_env_values["AWS_REGION"] or "us-east-1",
+        "SOURCE_ECR_REGISTRY": (request.source_ecr_registry or source_env_values["ECR_REGISTRY"]).strip(),
+        "SOURCE_ECR_REPOSITORY": (request.source_ecr_repository or source_env_values["ECR_REPOSITORY"]).strip(),
+        "TARGET_ECR_REGISTRY": (request.target_ecr_registry or target_env_values["ECR_REGISTRY"]).strip(),
+        "TARGET_ECR_REPOSITORY": (request.target_ecr_repository or target_env_values["ECR_REPOSITORY"]).strip(),
         "SOURCE_IMAGE_TAG": (request.source_image_tag or "").strip(),
         "TARGET_IMAGE_TAG": request.target_image_tag.strip() or "prod",
-        "CLIENT_AWS_ROLE_ARN": (request.client_aws_role_arn or "").strip(),
-        "SOURCE_AWS_ROLE_ARN": (request.source_aws_role_arn or request.client_aws_role_arn or "").strip(),
-        "TARGET_AWS_ROLE_ARN": (request.target_aws_role_arn or request.client_aws_role_arn or "").strip(),
-        "DEV_CLUSTER_NAME": (request.dev_cluster_name or "").strip(),
-        "QA_CLUSTER_NAME": (request.qa_cluster_name or "").strip(),
-        "STAGE_CLUSTER_NAME": (request.stage_cluster_name or "").strip(),
-        "PROD_CLUSTER_NAME": (request.prod_cluster_name or "").strip(),
-        "NAMESPACE_STRATEGY": (request.namespace_strategy or "auto").strip(),
-        "APP_NAMESPACE": (request.app_namespace or "").strip(),
-        "DEV_NAMESPACE": (request.dev_namespace or "").strip(),
-        "QA_NAMESPACE": (request.qa_namespace or "").strip(),
-        "STAGE_NAMESPACE": (request.stage_namespace or "").strip(),
-        "PROD_NAMESPACE": (request.prod_namespace or "").strip(),
+        "CLIENT_AWS_ROLE_ARN": (request.client_aws_role_arn or target_env_values["CLIENT_AWS_ROLE_ARN"] or source_env_values["CLIENT_AWS_ROLE_ARN"]).strip(),
+        "SOURCE_AWS_ROLE_ARN": (request.source_aws_role_arn or source_env_values["SOURCE_AWS_ROLE_ARN"] or source_env_values["CLIENT_AWS_ROLE_ARN"]).strip(),
+        "TARGET_AWS_ROLE_ARN": (request.target_aws_role_arn or target_env_values["TARGET_AWS_ROLE_ARN"] or target_env_values["CLIENT_AWS_ROLE_ARN"]).strip(),
+        "DEV_CLUSTER_NAME": source_env_values["DEV_CLUSTER_NAME"] or target_env_values["DEV_CLUSTER_NAME"],
+        "QA_CLUSTER_NAME": source_env_values["QA_CLUSTER_NAME"] or target_env_values["QA_CLUSTER_NAME"],
+        "STAGE_CLUSTER_NAME": source_env_values["STAGE_CLUSTER_NAME"] or target_env_values["STAGE_CLUSTER_NAME"],
+        "PROD_CLUSTER_NAME": target_env_values["PROD_CLUSTER_NAME"],
+        "NAMESPACE_STRATEGY": target_env_values["NAMESPACE_STRATEGY"],
+        "APP_NAMESPACE": target_env_values["APP_NAMESPACE"],
+        "DEV_NAMESPACE": source_env_values["DEV_NAMESPACE"] or target_env_values["DEV_NAMESPACE"],
+        "QA_NAMESPACE": source_env_values["QA_NAMESPACE"] or target_env_values["QA_NAMESPACE"],
+        "STAGE_NAMESPACE": source_env_values["STAGE_NAMESPACE"] or target_env_values["STAGE_NAMESPACE"],
+        "PROD_NAMESPACE": target_env_values["PROD_NAMESPACE"],
         "SECRET_ENABLED": str(request.secret_enabled).lower(),
         "XID_ARRAY": (request.xid_array or "").strip(),
         "APPROVER": (request.approver or "").strip(),
         "NOTIFY_EMAIL": (request.notify_email or "").strip(),
-        "ENABLE_NOTIFICATIONS": str(request.enable_notifications).lower(),
-        "SNS_TOPIC_ARN": (request.sns_topic_arn or "").strip(),
+        "NOTIFY_CC": (request.additional_notify_emails or "").strip(),
+        "ENABLE_NOTIFICATIONS": str(notification_requested).lower(),
+        "SNS_TOPIC_ARN": target_env_values["SNS_TOPIC_ARN"] or source_env_values["SNS_TOPIC_ARN"] or (request.sns_topic_arn or "").strip(),
     }
     xml_values = {k: escape(v, quote=True) for k, v in values.items()}
 
@@ -1226,6 +1511,7 @@ main_template([
   XID_ARRAY: "${{XID_ARRAY}}",
   APPROVER: "${{APPROVER}}",
   NOTIFY_EMAIL: "${{NOTIFY_EMAIL}}",
+  NOTIFY_CC: "${{NOTIFY_CC}}",
   ENABLE_NOTIFICATIONS: "${{ENABLE_NOTIFICATIONS}}",
   SNS_TOPIC_ARN: "${{SNS_TOPIC_ARN}}"
 ])
@@ -1670,11 +1956,12 @@ async def github_webhook(
 # from fastapi.middleware.cors import CORSMiddleware
 # from fastapi.responses import JSONResponse
 # from pydantic import BaseModel
-# from typing import List, Optional
+# from typing import List, Optional, Dict, Any
 # import os
 # import requests
 # import json
 # from ldap3 import Server, Connection, ALL, SUBTREE
+from ldap3.utils.conv import escape_filter_chars
 
 # app = FastAPI(root_path="/pipeline/api")
 
@@ -1710,9 +1997,6 @@ async def github_webhook(
 #     ENABLE_OPA: bool
 #     ENABLE_TRIVY: bool
 #     requestedBy: str
-
-# class TriggerRequest(BaseModel):
-#     project_name: str
 
 # class VulnerabilityModel(BaseModel):
 #     target: str

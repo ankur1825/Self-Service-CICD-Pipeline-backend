@@ -97,6 +97,8 @@ def default_license_from_env() -> Dict[str, Any]:
         "enabled_pipelines": _split_csv(os.getenv("ENTERPRISE_ENABLED_PIPELINES", "Devops Pipeline,Test Devops Pipeline,Prod Devops Pipeline")),
         "enabled_features": _split_csv(os.getenv("ENTERPRISE_ENABLED_FEATURES", "build,artifact_publish,code_scan,image_scan,policy_validation,static_application_security,test_suites,notifications,secret_management,prod_deploy,ai_remediation")),
         "allowed_environments": _split_csv(os.getenv("ENTERPRISE_ALLOWED_ENVIRONMENTS", "DEV,QA,STAGE,EKS-NONPROD,EKS-PROD")),
+        "allowed_aws_account_ids": _split_csv(os.getenv("ENTERPRISE_ALLOWED_AWS_ACCOUNT_IDS", "")),
+        "installation_id": os.getenv("ENTERPRISE_INSTALLATION_ID", ""),
         "max_repos": int(os.getenv("ENTERPRISE_MAX_REPOS", "999999")),
         "max_builds_per_month": int(os.getenv("ENTERPRISE_MAX_BUILDS_PER_MONTH", "999999")),
         "max_users": int(os.getenv("ENTERPRISE_MAX_USERS", "999999")),
@@ -116,6 +118,8 @@ def merge_request_license(request_values: Dict[str, Any]) -> Dict[str, Any]:
         "enabled_pipelines",
         "enabled_features",
         "allowed_environments",
+        "allowed_aws_account_ids",
+        "installation_id",
     ]:
         value = request_values.get(key)
         if value not in (None, "", []):
@@ -130,7 +134,13 @@ def _contains(values: Iterable[str], expected: str) -> bool:
     return any(item.strip().lower() == expected_normalized for item in values)
 
 
-def validate_license(license_doc: Dict[str, Any], pipeline_name: str, target_env: str, requested_features: Iterable[str]) -> Dict[str, Any]:
+def validate_license(
+    license_doc: Dict[str, Any],
+    pipeline_name: str,
+    target_env: str,
+    requested_features: Iterable[str],
+    aws_account_id: Optional[str] = None,
+) -> Dict[str, Any]:
     if not license_enforcement_enabled():
         license_doc.setdefault("validation_mode", "disabled")
         license_doc.setdefault("status", "active")
@@ -164,6 +174,15 @@ def validate_license(license_doc: Dict[str, Any], pipeline_name: str, target_env
     if allowed_environments and not _contains(allowed_environments, target_env):
         raise LicenseValidationError(f"Environment '{target_env}' is not enabled for this license.")
 
+    allowed_aws_account_ids = license_doc.get("allowed_aws_account_ids") or _split_csv(os.getenv("ENTERPRISE_ALLOWED_AWS_ACCOUNT_IDS", ""))
+    if allowed_aws_account_ids and aws_account_id and not _contains(allowed_aws_account_ids, aws_account_id):
+        raise LicenseValidationError(f"AWS account '{aws_account_id}' is not enabled for this license.")
+
+    expected_installation_id = license_doc.get("installation_id") or ""
+    runtime_installation_id = os.getenv("ENTERPRISE_INSTALLATION_ID", "").strip()
+    if expected_installation_id and runtime_installation_id and expected_installation_id != runtime_installation_id:
+        raise LicenseValidationError("License is not valid for this product installation.")
+
     enabled_features = license_doc.get("enabled_features") or []
     for feature in requested_features:
         if enabled_features and not _contains(enabled_features, feature):
@@ -183,6 +202,8 @@ def license_summary(license_doc: Dict[str, Any]) -> Dict[str, Any]:
         "enabled_pipelines": license_doc.get("enabled_pipelines", []),
         "enabled_features": license_doc.get("enabled_features", []),
         "allowed_environments": license_doc.get("allowed_environments", []),
+        "allowed_aws_account_ids": license_doc.get("allowed_aws_account_ids", []),
+        "installation_id": license_doc.get("installation_id") or os.getenv("ENTERPRISE_INSTALLATION_ID", ""),
         "max_repos": license_doc.get("max_repos"),
         "max_builds_per_month": license_doc.get("max_builds_per_month"),
         "max_users": license_doc.get("max_users"),

@@ -56,3 +56,27 @@ class Vulnerability(Base):
     jenkins_url = Column(String, nullable=True)
 
     application = relationship("Application", back_populates="vulnerabilities")
+
+
+class EnvironmentCatalog(Base):
+    __tablename__ = "environment_catalog"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, unique=True, nullable=False, index=True)
+    display_name = Column(String, nullable=True)
+    account_tier = Column(String, nullable=True)
+    aws_account_id = Column(String, nullable=True)
+    aws_region = Column(String, default="us-east-1")
+    ecr_registry = Column(String, nullable=True)
+    ecr_repository_template = Column(String, nullable=True)
+    artifact_bucket = Column(String, nullable=True)
+    client_aws_role_arn = Column(String, nullable=True)
+    nonprod_aws_role_arn = Column(String, nullable=True)
+    source_aws_role_arn = Column(String, nullable=True)
+    target_aws_role_arn = Column(String, nullable=True)
+    cluster_name = Column(String, nullable=True)
+    namespace_strategy = Column(String, default="auto")
+    namespace_template = Column(String, default="{client_id}-{project_name}-{env}")
+    sns_topic_arn = Column(String, nullable=True)
+    is_active = Column(Integer, default=1)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

@@ -1,0 +1,8 @@
+.git
+__pycache__
+*.pyc
+.DS_Store
+data
+horizon-self-service-cicd-pipeline-backend
+main-bkp.py
+main-correct.py

@@ -1,0 +1,10 @@
+{{- if .Values.environmentCatalog.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "horizon-self-service-cicd-pipeline-backend.fullname" . }}-environment-catalog
+  namespace: {{ .Values.namespaceOverride }}
+data:
+  environment-catalog.json: |-
+{{ dict "environments" .Values.environmentCatalog.environments | toPrettyJson | indent 4 }}
+{{- end }}

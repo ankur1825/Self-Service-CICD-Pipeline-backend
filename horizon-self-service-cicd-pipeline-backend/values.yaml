@@ -3,9 +3,9 @@ namespaceOverride: horizon-relevance-dev
 replicaCount: 1
 
 image:
-  repository: ankur1825/horizon-self-service-cicd-pipeline-backend
-  tag: "1.4.19"
-  pullPolicy: IfNotPresent
+  repository: 426946630837.dkr.ecr.us-east-1.amazonaws.com/horizon/backend
+  tag: "1.4.22"
+  pullPolicy: Always
 
 service:
   type: ClusterIP
@@ -19,6 +19,22 @@ ldap:
   uidAttribute: "uid"
   displayNameAttribute: "displayName"
   mailAttribute: "mail"
+  groupBaseDN: "ou=groups,dc=horizonrelevance,dc=local"
+  groupSearchFilter: "(objectClass=groupOfNames)"
+  groupMemberAttribute: "member"
+  groupNameAttribute: "cn"
+  userGroupAttribute: "memberOf"
+  roleGroupMappings:
+    platform-admin:
+      - horizon-platform-admins
+    developer:
+      - horizon-developers
+    qa:
+      - horizon-qa
+    release-manager:
+      - horizon-release-managers
+    viewer:
+      - horizon-viewers
   managerPasswordSecret:
     name: jenkins-ldap
     key: password
@@ -62,6 +78,8 @@ enterprise:
   enabledPipelines: "Devops Pipeline,Test Devops Pipeline,Prod Devops Pipeline"
   enabledFeatures: "build,artifact_publish,code_scan,image_scan,policy_validation,static_application_security,test_suites,notifications,secret_management,prod_deploy,ai_remediation"
   allowedEnvironments: "DEV,QA,STAGE,EKS-NONPROD,EKS-PROD"
+  allowedAwsAccountIds: ""
+  installationId: ""
   maxRepos: "999999"
   maxBuildsPerMonth: "999999"
   maxUsers: "999999"
@@ -75,6 +93,79 @@ enterprise:
   signingSecret:
     existingSecret: ""
     key: ENTERPRISE_LICENSE_SIGNING_SECRET
+
+environmentCatalog:
+  enabled: true
+  configFile: /app/config/environment-catalog.json
+  environments:
+    - name: DEV
+      display_name: Development
+      account_tier: nonprod
+      aws_account_id: ""
+      aws_region: us-east-1
+      ecr_registry: ""
+      ecr_repository_template: "{project_name}"
+      artifact_bucket: ""
+      client_aws_role_arn: ""
+      nonprod_aws_role_arn: ""
+      source_aws_role_arn: ""
+      target_aws_role_arn: ""
+      cluster_name: ""
+      namespace_strategy: auto
+      namespace_template: "{client_id}-{project_name}-{env}"
+      sns_topic_arn: ""
+      is_active: true
+    - name: QA
+      display_name: Quality Assurance
+      account_tier: nonprod
+      aws_account_id: ""
+      aws_region: us-east-1
+      ecr_registry: ""
+      ecr_repository_template: "{project_name}"
+      artifact_bucket: ""
+      client_aws_role_arn: ""
+      nonprod_aws_role_arn: ""
+      source_aws_role_arn: ""
+      target_aws_role_arn: ""
+      cluster_name: ""
+      namespace_strategy: auto
+      namespace_template: "{client_id}-{project_name}-{env}"
+      sns_topic_arn: ""
+      is_active: true
+    - name: STAGE
+      display_name: Stage
+      account_tier: nonprod
+      aws_account_id: ""
+      aws_region: us-east-1
+      ecr_registry: ""
+      ecr_repository_template: "{project_name}"
+      artifact_bucket: ""
+      client_aws_role_arn: ""
+      nonprod_aws_role_arn: ""
+      source_aws_role_arn: ""
+      target_aws_role_arn: ""
+      cluster_name: ""
+      namespace_strategy: auto
+      namespace_template: "{client_id}-{project_name}-{env}"
+      sns_topic_arn: ""
+      is_active: true
+    - name: PROD
+      display_name: Production
+      account_tier: prod
+      aws_account_id: ""
+      aws_region: us-east-1
+      ecr_registry: ""
+      ecr_repository_template: "{project_name}"
+      artifact_bucket: ""
+      client_aws_role_arn: ""
+      nonprod_aws_role_arn: ""
+      source_aws_role_arn: ""
+      target_aws_role_arn: ""
+      cluster_name: ""
+      namespace_strategy: auto
+      namespace_template: "{client_id}-{project_name}-{env}"
+      sns_topic_arn: ""
+      is_active: true
 
 resources:
   requests:

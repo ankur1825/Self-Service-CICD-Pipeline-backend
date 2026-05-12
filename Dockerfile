@@ -23,7 +23,12 @@ RUN apt-get update && \
     
 COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
-COPY . .
+COPY main.py database.py models.py schemas.py ./
+COPY enterprise ./enterprise
+RUN useradd --create-home --uid 10001 appuser && \
+    mkdir -p /app/data && \
+    chown -R appuser:appuser /app
+USER appuser
 
 EXPOSE 8000
 
