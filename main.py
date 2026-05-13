@@ -84,6 +84,19 @@ def jenkins_post(url: str, content_type: Optional[str] = None, data=None, params
         data=data,
         params=params,
         verify=False,
+        timeout=60,
+    )
+
+def jenkins_failure_response(action: str, response: requests.Response):
+    body = (response.text or "").strip()
+    logger.error("Jenkins %s failed with status %s: %s", action, response.status_code, body[:500])
+    return JSONResponse(
+        status_code=502,
+        content={
+            "error": f"Jenkins {action} failed",
+            "jenkins_status": response.status_code,
+            "jenkins_response": body[:1000],
+        },
     )
 
 # GitHub webhook secret
@@ -1137,12 +1150,19 @@ main_template([
         config_response = jenkins_post(f"{JENKINS_URL}/job/{job_name}/config.xml", content_type="application/xml", data=job_config)
         create_status = "updated"
         create_response_code = config_response.status_code
+        create_response_obj = config_response
     else:
         create_response = jenkins_post(f"{JENKINS_URL}/createItem?name={job_name}", content_type="application/xml", data=job_config)
         create_status = "created"
         create_response_code = create_response.status_code
+        create_response_obj = create_response
+
+    if create_response_code not in (200, 201, 202):
+        return jenkins_failure_response(f"{create_status} job '{job_name}'", create_response_obj)
 
     build_response = jenkins_post(f"{JENKINS_URL}/job/{job_name}/buildWithParameters", params=values)
+    if build_response.status_code not in (200, 201, 202):
+        return jenkins_failure_response(f"trigger build for job '{job_name}'", build_response)
 
     return {
         "status": f"Devops pipeline {create_status} and triggered",
@@ -1314,12 +1334,19 @@ main_template([
         config_response = jenkins_post(f"{JENKINS_URL}/job/{job_name}/config.xml", content_type="application/xml", data=job_config)
         create_status = "updated"
         create_response_code = config_response.status_code
+        create_response_obj = config_response
     else:
         create_response = jenkins_post(f"{JENKINS_URL}/createItem?name={job_name}", content_type="application/xml", data=job_config)
         create_status = "created"
         create_response_code = create_response.status_code
+        create_response_obj = create_response
+
+    if create_response_code not in (200, 201, 202):
+        return jenkins_failure_response(f"{create_status} job '{job_name}'", create_response_obj)
 
     build_response = jenkins_post(f"{JENKINS_URL}/job/{job_name}/buildWithParameters", params=values)
+    if build_response.status_code not in (200, 201, 202):
+        return jenkins_failure_response(f"trigger build for job '{job_name}'", build_response)
 
     return {
         "status": f"Test Devops pipeline {create_status} and triggered",
@@ -1531,6 +1558,7 @@ main_template([
         )
         create_status = "updated"
         create_response_code = config_response.status_code
+        create_response_obj = config_response
     else:
         create_response = jenkins_post(
             f"{JENKINS_URL}/createItem?name={job_name}",
@@ -1539,11 +1567,17 @@ main_template([
         )
         create_status = "created"
         create_response_code = create_response.status_code
+        create_response_obj = create_response
+
+    if create_response_code not in (200, 201, 202):
+        return jenkins_failure_response(f"{create_status} job '{job_name}'", create_response_obj)
 
     build_response = jenkins_post(
         f"{JENKINS_URL}/job/{job_name}/buildWithParameters",
         params=values,
     )
+    if build_response.status_code not in (200, 201, 202):
+        return jenkins_failure_response(f"trigger build for job '{job_name}'", build_response)
 
     return {
         "status": f"Prod Devops pipeline {create_status} and triggered",

@@ -4,7 +4,7 @@ replicaCount: 1
 
 image:
   repository: 426946630837.dkr.ecr.us-east-1.amazonaws.com/horizon/backend
-  tag: "1.4.22"
+  tag: "1.4.23"
   pullPolicy: Always
 
 service:
