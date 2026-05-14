@@ -1,12 +1,15 @@
 from fastapi import FastAPI, Request, Depends, Header, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 import os
 import requests
+import boto3
+from botocore.exceptions import BotoCoreError, ClientError, NoCredentialsError, NoRegionError
 from ldap3 import Server, Connection, ALL, SUBTREE
 from ldap3.utils.conv import escape_filter_chars
 import logging
@@ -37,10 +40,33 @@ app = FastAPI(root_path="/pipeline/api")
 
 Base.metadata.create_all(bind=engine)
 
+
+def ensure_environment_catalog_schema() -> None:
+    """Keep the lightweight SQLite catalog compatible with older installed releases."""
+    with engine.begin() as connection:
+        columns = {
+            row[1]
+            for row in connection.execute(text("PRAGMA table_info(environment_catalog)")).fetchall()
+        }
+        additions = {
+            "iam_validation_mode": "ALTER TABLE environment_catalog ADD COLUMN iam_validation_mode VARCHAR DEFAULT 'validation-only'",
+            "eks_access_mode": "ALTER TABLE environment_catalog ADD COLUMN eks_access_mode VARCHAR DEFAULT 'namespace-scoped'",
+        }
+        for column, ddl in additions.items():
+            if column not in columns:
+                connection.execute(text(ddl))
+
+
+ensure_environment_catalog_schema()
+
 # Jenkins configuration
 JENKINS_URL = os.getenv("JENKINS_URL", "https://horizonrelevance.com/jenkins")
 JENKINS_USER = os.getenv("JENKINS_USER")
 JENKINS_TOKEN = os.getenv("JENKINS_TOKEN")
+JENKINS_RUNTIME_ROLE_ARN = os.getenv("JENKINS_RUNTIME_ROLE_ARN", "").strip()
+ENVIRONMENT_PREFLIGHT_ENFORCED = os.getenv("ENVIRONMENT_PREFLIGHT_ENFORCED", "false").strip().lower() == "true"
+ENVIRONMENT_IAM_MODE = os.getenv("ENVIRONMENT_IAM_MODE", "validation-only").strip() or "validation-only"
+ENVIRONMENT_EKS_ACCESS_MODE = os.getenv("ENVIRONMENT_EKS_ACCESS_MODE", "namespace-scoped").strip() or "namespace-scoped"
 
 def jenkins_headers(content_type: Optional[str] = None):
     headers = {}
@@ -344,11 +370,18 @@ class EnvironmentCatalogEntryRequest(BaseModel):
     cluster_name: Optional[str] = None
     namespace_strategy: Optional[str] = "auto"
     namespace_template: Optional[str] = "{client_id}-{project_name}-{env}"
+    iam_validation_mode: Optional[str] = "validation-only"
+    eks_access_mode: Optional[str] = "namespace-scoped"
     sns_topic_arn: Optional[str] = None
     is_active: bool = True
 
 class EnvironmentCatalogRequest(BaseModel):
     environments: List[EnvironmentCatalogEntryRequest]
+
+class EnvironmentPreflightRequest(BaseModel):
+    project_name: str = "application"
+    pipeline_kind: str = "DEVOPS"
+    source_env: Optional[str] = None
 
 class TriggerRequest(BaseModel):
     project_name: str
@@ -579,6 +612,8 @@ def catalog_entry_to_dict(entry: EnvironmentCatalog) -> Dict[str, Any]:
         "cluster_name": entry.cluster_name or "",
         "namespace_strategy": entry.namespace_strategy or "auto",
         "namespace_template": entry.namespace_template or "{client_id}-{project_name}-{env}",
+        "iam_validation_mode": entry.iam_validation_mode or ENVIRONMENT_IAM_MODE,
+        "eks_access_mode": entry.eks_access_mode or ENVIRONMENT_EKS_ACCESS_MODE,
         "sns_topic_arn": entry.sns_topic_arn or "",
         "is_active": bool(entry.is_active),
         "updated_at": entry.updated_at.isoformat() if entry.updated_at else None,
@@ -594,10 +629,10 @@ def load_environment_catalog_seed() -> List[Dict[str, Any]]:
         if isinstance(payload, dict):
             return payload.get("environments") or []
     return [
-        {"name": "DEV", "display_name": "Development", "account_tier": "nonprod"},
-        {"name": "QA", "display_name": "Quality Assurance", "account_tier": "nonprod"},
-        {"name": "STAGE", "display_name": "Stage", "account_tier": "nonprod"},
-        {"name": "PROD", "display_name": "Production", "account_tier": "prod"},
+        {"name": "DEV", "display_name": "Development", "account_tier": "nonprod", "iam_validation_mode": ENVIRONMENT_IAM_MODE, "eks_access_mode": ENVIRONMENT_EKS_ACCESS_MODE},
+        {"name": "QA", "display_name": "Quality Assurance", "account_tier": "nonprod", "iam_validation_mode": ENVIRONMENT_IAM_MODE, "eks_access_mode": ENVIRONMENT_EKS_ACCESS_MODE},
+        {"name": "STAGE", "display_name": "Stage", "account_tier": "nonprod", "iam_validation_mode": ENVIRONMENT_IAM_MODE, "eks_access_mode": ENVIRONMENT_EKS_ACCESS_MODE},
+        {"name": "PROD", "display_name": "Production", "account_tier": "prod", "iam_validation_mode": ENVIRONMENT_IAM_MODE, "eks_access_mode": ENVIRONMENT_EKS_ACCESS_MODE},
     ]
 
 
@@ -607,17 +642,42 @@ def upsert_environment_catalog_entry(db: Session, raw: Dict[str, Any]) -> Enviro
     if not entry:
         entry = EnvironmentCatalog(name=env_name)
         db.add(entry)
+    field_aliases = {
+        "display_name": ["displayName"],
+        "account_tier": ["accountTier"],
+        "aws_account_id": ["awsAccountId"],
+        "aws_region": ["awsRegion"],
+        "ecr_registry": ["ecrRegistry"],
+        "ecr_repository_template": ["ecrRepositoryTemplate"],
+        "artifact_bucket": ["artifactBucket"],
+        "client_aws_role_arn": ["clientAwsRoleArn"],
+        "nonprod_aws_role_arn": ["nonprodAwsRoleArn"],
+        "source_aws_role_arn": ["sourceAwsRoleArn"],
+        "target_aws_role_arn": ["targetAwsRoleArn"],
+        "cluster_name": ["clusterName"],
+        "namespace_strategy": ["namespaceStrategy"],
+        "namespace_template": ["namespaceTemplate"],
+        "iam_validation_mode": ["iamValidationMode"],
+        "eks_access_mode": ["eksAccessMode"],
+        "sns_topic_arn": ["snsTopicArn"],
+    }
     allowed_fields = [
         "display_name", "account_tier", "aws_account_id", "aws_region", "ecr_registry",
         "ecr_repository_template", "artifact_bucket", "client_aws_role_arn", "nonprod_aws_role_arn",
         "source_aws_role_arn", "target_aws_role_arn", "cluster_name", "namespace_strategy",
-        "namespace_template", "sns_topic_arn",
+        "namespace_template", "iam_validation_mode", "eks_access_mode", "sns_topic_arn",
     ]
     for field in allowed_fields:
         value = raw.get(field)
+        if value is None:
+            for alias in field_aliases.get(field, []):
+                value = raw.get(alias)
+                if value is not None:
+                    break
         if value is not None:
             setattr(entry, field, str(value).strip())
-    entry.is_active = 1 if raw.get("is_active", True) else 0
+    is_active_value = raw.get("is_active", raw.get("isActive", True))
+    entry.is_active = 1 if is_active_value else 0
     entry.updated_at = datetime.utcnow()
     return entry
 
@@ -653,6 +713,8 @@ def resolve_environment_catalog_values(db: Session, target_env: str, project_nam
     repository_template = resolved("ecr_repository_template", "{project_name}")
     namespace_template = resolved("namespace_template", "{client_id}-{project_name}-{env}")
     namespace_strategy = resolved("namespace_strategy", request_value("namespace_strategy") or "auto")
+    iam_validation_mode = resolved("iam_validation_mode", ENVIRONMENT_IAM_MODE)
+    eks_access_mode = resolved("eks_access_mode", ENVIRONMENT_EKS_ACCESS_MODE)
     manual_namespace = request_value("app_namespace")
     namespace = manual_namespace if namespace_strategy == "manual" and manual_namespace else render_catalog_template(namespace_template, project_name, client_id, env)
     cluster_name = resolved("cluster_name", request_value(f"{env.lower()}_cluster_name"))
@@ -684,6 +746,8 @@ def resolve_environment_catalog_values(db: Session, target_env: str, project_nam
         "STAGE_CLUSTER_NAME": clusters["STAGE"] or request_value("stage_cluster_name"),
         "PROD_CLUSTER_NAME": clusters["PROD"] or request_value("prod_cluster_name"),
         "NAMESPACE_STRATEGY": namespace_strategy,
+        "IAM_VALIDATION_MODE": iam_validation_mode,
+        "EKS_ACCESS_MODE": eks_access_mode,
         "APP_NAMESPACE": namespace,
         "DEV_NAMESPACE": namespaces["DEV"] or request_value("dev_namespace"),
         "QA_NAMESPACE": namespaces["QA"] or request_value("qa_namespace"),
@@ -692,6 +756,335 @@ def resolve_environment_catalog_values(db: Session, target_env: str, project_nam
         "SNS_TOPIC_ARN": resolved("sns_topic_arn", request_value("sns_topic_arn")),
         "catalog": catalog,
     }, None
+
+
+def normalize_ecr_registry(registry: Optional[str], region: str) -> str:
+    registry_value = (registry or "").strip()
+    if re.fullmatch(r"[0-9]{12}", registry_value):
+        return f"{registry_value}.dkr.ecr.{region}.amazonaws.com"
+    return registry_value
+
+
+def deployment_role_from_values(env_values: Dict[str, Any]) -> str:
+    return (
+        env_values.get("TARGET_AWS_ROLE_ARN")
+        or env_values.get("NONPROD_AWS_ROLE_ARN")
+        or env_values.get("CLIENT_AWS_ROLE_ARN")
+        or env_values.get("SOURCE_AWS_ROLE_ARN")
+        or ""
+    ).strip()
+
+
+def preflight_check(
+    name: str,
+    status: str,
+    message: str,
+    required: bool = True,
+    remediation: Optional[str] = None,
+    details: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    return {
+        "name": name,
+        "status": status,
+        "required": required,
+        "message": message,
+        "remediation": remediation or "",
+        "details": details or {},
+    }
+
+
+def summarize_preflight(checks: List[Dict[str, Any]]) -> Dict[str, Any]:
+    blocking = [check for check in checks if check["required"] and check["status"] == "FAIL"]
+    warnings = [check for check in checks if check["status"] == "WARN"]
+    if blocking:
+        return {"ready": False, "status": "not_ready"}
+    if warnings:
+        return {"ready": True, "status": "ready_with_warnings"}
+    return {"ready": True, "status": "ready"}
+
+
+def assume_role_session(role_arn: str, region: str):
+    sts_client = boto3.client("sts", region_name=region)
+    response = sts_client.assume_role(
+        RoleArn=role_arn,
+        RoleSessionName=f"horizon-preflight-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}",
+        DurationSeconds=900,
+    )
+    credentials = response["Credentials"]
+    return boto3.Session(
+        aws_access_key_id=credentials["AccessKeyId"],
+        aws_secret_access_key=credentials["SecretAccessKey"],
+        aws_session_token=credentials["SessionToken"],
+        region_name=region,
+    )
+
+
+def run_environment_preflight(
+    db: Session,
+    target_env: str,
+    project_name: str = "application",
+    request: Optional[BaseModel] = None,
+    pipeline_kind: str = "DEVOPS",
+) -> Dict[str, Any]:
+    env_values, env_error = resolve_environment_catalog_values(db, target_env, project_name, request)
+    checks: List[Dict[str, Any]] = []
+    env = normalize_environment_name(target_env)
+
+    if env_error:
+        checks.append(preflight_check(
+            "Environment catalog",
+            "FAIL",
+            env_error,
+            remediation="A platform admin must save this environment in Environment Catalog before developers can run pipelines.",
+        ))
+        summary = summarize_preflight(checks)
+        return {
+            **summary,
+            "target_env": env,
+            "project_name": project_name,
+            "pipeline_kind": pipeline_kind,
+            "enforcement_enabled": ENVIRONMENT_PREFLIGHT_ENFORCED,
+            "checks": checks,
+        }
+
+    region = env_values.get("AWS_REGION") or "us-east-1"
+    namespace = env_values.get("APP_NAMESPACE") or ""
+    deployment_role = deployment_role_from_values(env_values)
+    ecr_registry = normalize_ecr_registry(env_values.get("ECR_REGISTRY"), region)
+    ecr_repository = env_values.get("ECR_REPOSITORY") or ""
+    artifact_bucket = env_values.get("ARTIFACT_BUCKET") or ""
+    cluster_name = (
+        env_values.get(f"{env}_CLUSTER_NAME")
+        or env_values.get("DEV_CLUSTER_NAME")
+        or env_values.get("QA_CLUSTER_NAME")
+        or env_values.get("STAGE_CLUSTER_NAME")
+        or env_values.get("PROD_CLUSTER_NAME")
+        or ""
+    )
+    iam_mode = env_values.get("IAM_VALIDATION_MODE") or ENVIRONMENT_IAM_MODE
+    eks_access_mode = env_values.get("EKS_ACCESS_MODE") or ENVIRONMENT_EKS_ACCESS_MODE
+
+    required_fields = {
+        "AWS region": region,
+        "Artifact bucket": artifact_bucket,
+        "Deployment role ARN": deployment_role,
+        "EKS cluster name": cluster_name,
+        "Namespace": namespace,
+    }
+    if pipeline_kind.upper() in {"DEVOPS", "PROD_DEVOPS"}:
+        required_fields["ECR registry"] = ecr_registry
+        required_fields["ECR repository"] = ecr_repository
+
+    missing = [label for label, value in required_fields.items() if not str(value or "").strip()]
+    checks.append(preflight_check(
+        "Required catalog fields",
+        "FAIL" if missing else "PASS",
+        "Missing required fields: " + ", ".join(missing) if missing else "All required deployable environment fields are present.",
+        remediation="Update Environment Catalog or installer client-values.yaml with the missing fields.",
+        details={"missing": missing},
+    ))
+
+    if not JENKINS_USER or not JENKINS_TOKEN or JENKINS_TOKEN == "replace-with-jenkins-api-token":
+        checks.append(preflight_check(
+            "Jenkins backend secret",
+            "FAIL",
+            "Backend is missing a real Jenkins API token.",
+            remediation="Create/update the Kubernetes secret that provides JENKINS_USER and JENKINS_TOKEN, then restart the backend pod.",
+        ))
+    else:
+        try:
+            jenkins_response = requests.get(
+                f"{JENKINS_URL}/whoAmI/api/json",
+                auth=(JENKINS_USER, JENKINS_TOKEN),
+                verify=False,
+                timeout=10,
+            )
+            checks.append(preflight_check(
+                "Jenkins API authentication",
+                "PASS" if jenkins_response.status_code == 200 else "FAIL",
+                "Backend can authenticate to Jenkins." if jenkins_response.status_code == 200 else f"Jenkins returned HTTP {jenkins_response.status_code}.",
+                remediation="Regenerate the Jenkins API token and update the backend Kubernetes secret.",
+            ))
+        except requests.RequestException as exc:
+            checks.append(preflight_check(
+                "Jenkins API authentication",
+                "FAIL",
+                f"Backend could not reach Jenkins: {exc}",
+                remediation="Validate JENKINS_URL, service routing, and the backend network path to Jenkins.",
+            ))
+
+    if not JENKINS_RUNTIME_ROLE_ARN:
+        checks.append(preflight_check(
+            "Jenkins IRSA role",
+            "WARN",
+            "JENKINS_RUNTIME_ROLE_ARN is not configured for preflight visibility.",
+            required=False,
+            remediation="Annotate the Jenkins service account with its IRSA role and set JENKINS_RUNTIME_ROLE_ARN in backend values.",
+        ))
+    else:
+        checks.append(preflight_check(
+            "Jenkins IRSA role",
+            "PASS",
+            "Jenkins runtime role is configured for IRSA-based deployments.",
+            required=False,
+            details={"role_arn": JENKINS_RUNTIME_ROLE_ARN},
+        ))
+
+    if not deployment_role:
+        summary = summarize_preflight(checks)
+        return {
+            **summary,
+            "target_env": env,
+            "project_name": project_name,
+            "pipeline_kind": pipeline_kind,
+            "namespace": namespace,
+            "iam_validation_mode": iam_mode,
+            "eks_access_mode": eks_access_mode,
+            "enforcement_enabled": ENVIRONMENT_PREFLIGHT_ENFORCED,
+            "checks": checks,
+        }
+
+    try:
+        validation_session = assume_role_session(deployment_role, region)
+        caller = validation_session.client("sts").get_caller_identity()
+        checks.append(preflight_check(
+            "Deployment role assumption",
+            "PASS",
+            "Validation runtime can assume the deployment role.",
+            details={"account": caller.get("Account"), "assumed_arn": caller.get("Arn")},
+        ))
+
+        if artifact_bucket:
+            try:
+                validation_session.client("s3").head_bucket(Bucket=artifact_bucket)
+                checks.append(preflight_check("Artifact bucket access", "PASS", "Deployment role can access the artifact bucket."))
+            except ClientError as exc:
+                checks.append(preflight_check(
+                    "Artifact bucket access",
+                    "FAIL",
+                    f"Deployment role cannot access bucket '{artifact_bucket}': {exc.response.get('Error', {}).get('Code', 'AccessDenied')}",
+                    remediation="Grant the deployment role least-privilege access to the configured artifacts bucket.",
+                ))
+
+        if ecr_registry and ecr_repository:
+            try:
+                ecr_client = validation_session.client("ecr", region_name=region)
+                ecr_client.describe_repositories(repositoryNames=[ecr_repository])
+                checks.append(preflight_check("Container registry access", "PASS", "Deployment role can read the target container repository."))
+            except ClientError as exc:
+                code = exc.response.get("Error", {}).get("Code", "")
+                checks.append(preflight_check(
+                    "Container registry access",
+                    "WARN" if code == "RepositoryNotFoundException" else "FAIL",
+                    "ECR repository does not exist yet; the build pipeline must be allowed to create it."
+                    if code == "RepositoryNotFoundException"
+                    else f"Deployment role cannot access ECR repository '{ecr_repository}': {code or exc}",
+                    required=code != "RepositoryNotFoundException",
+                    remediation="Pre-create the ECR repository or grant the deployment role the required ECR permissions.",
+                ))
+
+        if cluster_name:
+            eks_client = validation_session.client("eks", region_name=region)
+            try:
+                eks_client.describe_cluster(name=cluster_name)
+                checks.append(preflight_check("EKS cluster visibility", "PASS", "Deployment role can describe the target EKS cluster."))
+            except ClientError as exc:
+                checks.append(preflight_check(
+                    "EKS cluster visibility",
+                    "FAIL",
+                    f"Deployment role cannot describe EKS cluster '{cluster_name}': {exc.response.get('Error', {}).get('Code', 'AccessDenied')}",
+                    remediation="Grant eks:DescribeCluster to the deployment role for the target cluster.",
+                ))
+
+            try:
+                policies = eks_client.list_associated_access_policies(
+                    clusterName=cluster_name,
+                    principalArn=deployment_role,
+                ).get("associatedAccessPolicies", [])
+                namespace_policy = False
+                cluster_policy = False
+                for policy in policies:
+                    scope = policy.get("accessScope") or {}
+                    scope_type = str(scope.get("type") or "").lower()
+                    namespaces = scope.get("namespaces") or []
+                    if scope_type == "namespace" and namespace in namespaces:
+                        namespace_policy = True
+                    if scope_type == "cluster":
+                        cluster_policy = True
+
+                if namespace_policy:
+                    checks.append(preflight_check(
+                        "Namespace-scoped EKS access",
+                        "PASS",
+                        f"Deployment role is mapped to namespace '{namespace}'.",
+                    ))
+                elif cluster_policy:
+                    checks.append(preflight_check(
+                        "Namespace-scoped EKS access",
+                        "WARN",
+                        "Deployment role has cluster-scoped EKS access. This works, but is broader than the enterprise namespace-scoped model.",
+                        required=False,
+                        remediation="Associate the role with an EKS access policy scoped to the application namespace.",
+                    ))
+                else:
+                    checks.append(preflight_check(
+                        "Namespace-scoped EKS access",
+                        "FAIL" if eks_access_mode == "namespace-scoped" else "WARN",
+                        f"No EKS access policy was found for namespace '{namespace}'.",
+                        required=eks_access_mode == "namespace-scoped",
+                        remediation="Map the deployment role into EKS and grant Kubernetes RBAC only for the approved namespace.",
+                    ))
+            except ClientError as exc:
+                checks.append(preflight_check(
+                    "Namespace-scoped EKS access",
+                    "WARN",
+                    f"Unable to validate EKS access policies: {exc.response.get('Error', {}).get('Code', 'AccessDenied')}",
+                    required=False,
+                    remediation="Installer validation should verify the role mapping and namespace RBAC when this API is not permitted.",
+                ))
+
+    except (ClientError, BotoCoreError, NoCredentialsError, NoRegionError) as exc:
+        checks.append(preflight_check(
+            "Deployment role assumption",
+            "FAIL",
+            f"Validation runtime cannot assume deployment role '{deployment_role}': {exc}",
+            remediation="In validation-only mode, the client-created role must trust the platform validation/Jenkins IRSA role for sts:AssumeRole.",
+        ))
+
+    summary = summarize_preflight(checks)
+    return {
+        **summary,
+        "target_env": env,
+        "project_name": project_name,
+        "pipeline_kind": pipeline_kind,
+        "namespace": namespace,
+        "iam_validation_mode": iam_mode,
+        "eks_access_mode": eks_access_mode,
+        "enforcement_enabled": ENVIRONMENT_PREFLIGHT_ENFORCED,
+        "resolved": {
+            "aws_region": region,
+            "aws_account_id": env_values.get("AWS_ACCOUNT_ID"),
+            "ecr_registry": ecr_registry,
+            "ecr_repository": ecr_repository,
+            "artifact_bucket": artifact_bucket,
+            "cluster_name": cluster_name,
+            "namespace": namespace,
+        },
+        "checks": checks,
+    }
+
+
+def preflight_blocking_response(preflight: Dict[str, Any]) -> Optional[JSONResponse]:
+    if not ENVIRONMENT_PREFLIGHT_ENFORCED or preflight.get("ready"):
+        return None
+    return JSONResponse(
+        status_code=400,
+        content={
+            "error": "Environment is not ready for pipeline execution.",
+            "status": "environment_not_ready",
+            "preflight": preflight,
+        },
+    )
 
 
 @app.get("/environment-catalog")
@@ -707,6 +1100,31 @@ def resolve_environment_catalog(target_env: str, project_name: str = "applicatio
     if error:
         return JSONResponse(status_code=404, content={"error": error})
     return resolved
+
+
+@app.get("/environment-catalog/preflight/{target_env}")
+def get_environment_preflight(
+    target_env: str,
+    project_name: str = "application",
+    pipeline_kind: str = "DEVOPS",
+    db: Session = Depends(get_db),
+):
+    return run_environment_preflight(db, target_env, project_name, pipeline_kind=pipeline_kind)
+
+
+@app.post("/environment-catalog/preflight/{target_env}")
+def post_environment_preflight(
+    target_env: str,
+    request: EnvironmentPreflightRequest,
+    db: Session = Depends(get_db),
+):
+    return run_environment_preflight(
+        db,
+        target_env,
+        request.project_name,
+        request,
+        pipeline_kind=request.pipeline_kind,
+    )
 
 
 @app.post("/environment-catalog")
@@ -1032,6 +1450,11 @@ def create_devops_pipeline(request: DevopsPipelineRequest, db: Session = Depends
             },
         )
 
+    preflight = run_environment_preflight(db, request.target_env, job_name, request, pipeline_kind="DEVOPS")
+    blocking_preflight = preflight_blocking_response(preflight)
+    if blocking_preflight:
+        return blocking_preflight
+
     license_doc = merge_request_license(request.dict())
     try:
         validated_license = validate_license(
@@ -1089,6 +1512,8 @@ def create_devops_pipeline(request: DevopsPipelineRequest, db: Session = Depends
         "STAGE_CLUSTER_NAME": env_values["STAGE_CLUSTER_NAME"],
         "PROD_CLUSTER_NAME": env_values["PROD_CLUSTER_NAME"],
         "NAMESPACE_STRATEGY": env_values["NAMESPACE_STRATEGY"],
+        "IAM_VALIDATION_MODE": env_values["IAM_VALIDATION_MODE"],
+        "EKS_ACCESS_MODE": env_values["EKS_ACCESS_MODE"],
         "APP_NAMESPACE": env_values["APP_NAMESPACE"],
         "DEV_NAMESPACE": env_values["DEV_NAMESPACE"],
         "QA_NAMESPACE": env_values["QA_NAMESPACE"],
@@ -1171,6 +1596,7 @@ main_template([
         "target_env": env_values["TARGET_ENV"],
         "namespace": env_values["APP_NAMESPACE"],
         "license": license_summary_doc,
+        "environment_preflight": preflight,
         "create_response_code": create_response_code,
         "build_response_code": build_response.status_code,
     }
@@ -1206,6 +1632,11 @@ def create_test_devops_pipeline(request: TestDevopsPipelineRequest, db: Session 
                 "target_env": env_values["TARGET_ENV"],
             },
         )
+
+    preflight = run_environment_preflight(db, request.target_env, request.project_name.strip(), request, pipeline_kind="TEST_DEVOPS")
+    blocking_preflight = preflight_blocking_response(preflight)
+    if blocking_preflight:
+        return blocking_preflight
 
     license_doc = merge_request_license(request.dict())
     try:
@@ -1278,6 +1709,8 @@ def create_test_devops_pipeline(request: TestDevopsPipelineRequest, db: Session 
         "CLIENT_AWS_ROLE_ARN": env_values["CLIENT_AWS_ROLE_ARN"],
         "NONPROD_AWS_ROLE_ARN": env_values["NONPROD_AWS_ROLE_ARN"],
         "TARGET_AWS_ROLE_ARN": env_values["TARGET_AWS_ROLE_ARN"],
+        "IAM_VALIDATION_MODE": env_values["IAM_VALIDATION_MODE"],
+        "EKS_ACCESS_MODE": env_values["EKS_ACCESS_MODE"],
         "ENABLE_NOTIFICATIONS": str(notification_requested).lower(),
         "SNS_TOPIC_ARN": env_values["SNS_TOPIC_ARN"],
     }
@@ -1354,6 +1787,7 @@ main_template([
         "jenkins_job": job_name,
         "project_type": request.project_type,
         "license": license_summary(validated_license),
+        "environment_preflight": preflight,
         "create_response_code": create_response_code,
         "build_response_code": build_response.status_code,
     }
@@ -1389,6 +1823,21 @@ def create_prod_devops_pipeline(request: ProdDevopsPipelineRequest, db: Session 
                 "missing_fields": sorted(set(missing_catalog_fields)),
                 "source_env": source_env_values["TARGET_ENV"],
                 "target_env": target_env_values["TARGET_ENV"],
+            },
+        )
+
+    source_preflight = run_environment_preflight(db, request.source_env, request.project_name.strip(), request, pipeline_kind="PROD_DEVOPS_SOURCE")
+    target_preflight = run_environment_preflight(db, request.target_env, request.project_name.strip(), request, pipeline_kind="PROD_DEVOPS")
+    if ENVIRONMENT_PREFLIGHT_ENFORCED and (not source_preflight.get("ready") or not target_preflight.get("ready")):
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "Source or target environment is not ready for production promotion.",
+                "status": "environment_not_ready",
+                "preflight": {
+                    "source": source_preflight,
+                    "target": target_preflight,
+                },
             },
         )
 
@@ -1448,6 +1897,8 @@ def create_prod_devops_pipeline(request: ProdDevopsPipelineRequest, db: Session 
         "STAGE_CLUSTER_NAME": source_env_values["STAGE_CLUSTER_NAME"] or target_env_values["STAGE_CLUSTER_NAME"],
         "PROD_CLUSTER_NAME": target_env_values["PROD_CLUSTER_NAME"],
         "NAMESPACE_STRATEGY": target_env_values["NAMESPACE_STRATEGY"],
+        "IAM_VALIDATION_MODE": target_env_values["IAM_VALIDATION_MODE"],
+        "EKS_ACCESS_MODE": target_env_values["EKS_ACCESS_MODE"],
         "APP_NAMESPACE": target_env_values["APP_NAMESPACE"],
         "DEV_NAMESPACE": source_env_values["DEV_NAMESPACE"] or target_env_values["DEV_NAMESPACE"],
         "QA_NAMESPACE": source_env_values["QA_NAMESPACE"] or target_env_values["QA_NAMESPACE"],
@@ -1584,6 +2035,10 @@ main_template([
         "project_name": request.project_name,
         "job_name": job_name,
         "license": license_summary_doc,
+        "environment_preflight": {
+            "source": source_preflight,
+            "target": target_preflight,
+        },
         "create_response_code": create_response_code,
         "build_response_code": build_response.status_code,
     }

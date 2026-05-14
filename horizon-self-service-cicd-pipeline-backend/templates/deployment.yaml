@@ -36,13 +36,21 @@ spec:
             - name: JENKINS_USER
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Chart.Name }}
-                  key: JENKINS_USER
+                  name: {{ default .Chart.Name .Values.jenkins.existingSecret | quote }}
+                  key: {{ .Values.jenkins.userKey | default "JENKINS_USER" | quote }}
             - name: JENKINS_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Chart.Name }}
-                  key: JENKINS_TOKEN
+                  name: {{ default .Chart.Name .Values.jenkins.existingSecret | quote }}
+                  key: {{ .Values.jenkins.tokenKey | default "JENKINS_TOKEN" | quote }}
+            - name: JENKINS_RUNTIME_ROLE_ARN
+              value: {{ .Values.jenkins.runtimeRoleArn | default "" | quote }}
+            - name: ENVIRONMENT_PREFLIGHT_ENFORCED
+              value: {{ .Values.environmentPreflight.enforce | quote }}
+            - name: ENVIRONMENT_IAM_MODE
+              value: {{ .Values.environmentPreflight.iamMode | default "validation-only" | quote }}
+            - name: ENVIRONMENT_EKS_ACCESS_MODE
+              value: {{ .Values.environmentPreflight.eksAccessMode | default "namespace-scoped" | quote }}
             # - name: REQUESTS_CA_BUNDLE
             #   value: "/certs/jenkins-ca.pem"   # Path inside container
             - name: LDAP_MANAGER_PASSWORD

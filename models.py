@@ -77,6 +77,8 @@ class EnvironmentCatalog(Base):
     cluster_name = Column(String, nullable=True)
     namespace_strategy = Column(String, default="auto")
     namespace_template = Column(String, default="{client_id}-{project_name}-{env}")
+    iam_validation_mode = Column(String, default="validation-only")
+    eks_access_mode = Column(String, default="namespace-scoped")
     sns_topic_arn = Column(String, nullable=True)
     is_active = Column(Integer, default=1)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

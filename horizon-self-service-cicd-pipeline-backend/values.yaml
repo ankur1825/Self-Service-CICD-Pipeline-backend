@@ -65,8 +65,17 @@ ingress:
 jenkins:
   user: ankur.kashyap
   token: replace-with-jenkins-api-token
+  existingSecret: ""
+  userKey: JENKINS_USER
+  tokenKey: JENKINS_TOKEN
+  runtimeRoleArn: ""
   #user: sg1917459
   #token: 113232cbe431bdfa47ef491bbb07c5b93c        
+
+environmentPreflight:
+  enforce: false
+  iamMode: validation-only
+  eksAccessMode: namespace-scoped
 
 enterprise:
   licenseEnforcementEnabled: false
@@ -113,6 +122,8 @@ environmentCatalog:
       cluster_name: ""
       namespace_strategy: auto
       namespace_template: "{client_id}-{project_name}-{env}"
+      iam_validation_mode: validation-only
+      eks_access_mode: namespace-scoped
       sns_topic_arn: ""
       is_active: true
     - name: QA
@@ -130,6 +141,8 @@ environmentCatalog:
       cluster_name: ""
       namespace_strategy: auto
       namespace_template: "{client_id}-{project_name}-{env}"
+      iam_validation_mode: validation-only
+      eks_access_mode: namespace-scoped
       sns_topic_arn: ""
       is_active: true
     - name: STAGE
@@ -147,6 +160,8 @@ environmentCatalog:
       cluster_name: ""
       namespace_strategy: auto
       namespace_template: "{client_id}-{project_name}-{env}"
+      iam_validation_mode: validation-only
+      eks_access_mode: namespace-scoped
       sns_topic_arn: ""
       is_active: true
     - name: PROD
@@ -164,6 +179,8 @@ environmentCatalog:
       cluster_name: ""
       namespace_strategy: auto
       namespace_template: "{client_id}-{project_name}-{env}"
+      iam_validation_mode: validation-only
+      eks_access_mode: namespace-scoped
       sns_topic_arn: ""
       is_active: true
 
