@@ -68,7 +68,7 @@ jenkins:
   existingSecret: ""
   userKey: JENKINS_USER
   tokenKey: JENKINS_TOKEN
-  runtimeRoleArn: ""
+  runtimeRoleArn: "arn:aws:iam::426946630837:role/HorizonJenkinsRuntimeRole"
   #user: sg1917459
   #token: 113232cbe431bdfa47ef491bbb07c5b93c        
 
