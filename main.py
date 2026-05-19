@@ -2239,8 +2239,50 @@ SECURITY_CATEGORY_BY_SOURCE = {
     "STATIC CODE SECURITY FINDING": "Static Code Security Finding",
 }
 
-def normalize_security_category(source: Optional[str], package_name: Optional[str], vulnerability_id: Optional[str]) -> str:
+CONTAINER_TARGET_MARKERS = (
+    "(alpine",
+    "(amazon",
+    "(centos",
+    "(debian",
+    "(oracle",
+    "(redhat",
+    "(rocky",
+    "(ubuntu",
+    "(wolfi",
+)
+
+DEPENDENCY_TARGET_MARKERS = (
+    "package-lock.json",
+    "package.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "pom.xml",
+    "build.gradle",
+    "requirements.txt",
+    "poetry.lock",
+    "pipfile.lock",
+    "go.mod",
+    "composer.lock",
+    "gemfile.lock",
+)
+
+def looks_like_container_target(target: Optional[str]) -> bool:
+    target_value = (target or "").strip().lower()
+    if not target_value:
+        return False
+    if any(marker in target_value for marker in DEPENDENCY_TARGET_MARKERS):
+        return False
+    return any(marker in target_value for marker in CONTAINER_TARGET_MARKERS)
+
+def normalize_security_category(
+    source: Optional[str],
+    package_name: Optional[str],
+    vulnerability_id: Optional[str],
+    target: Optional[str] = None,
+) -> str:
     source_key = (source or "").strip().upper()
+    if source_key == "DEPENDENCY VULNERABILITY" and looks_like_container_target(target):
+        return "Container Vulnerability"
     if source_key in SECURITY_CATEGORY_BY_SOURCE:
         return SECURITY_CATEGORY_BY_SOURCE[source_key]
     if (package_name or "").lower().endswith("policy") or "policy" in (vulnerability_id or "").lower():
@@ -2261,7 +2303,7 @@ def normalize_remediation(v: Vulnerability) -> str:
     return "Review the affected component, validate exploitability, and apply the recommended vendor fix."
 
 def serialize_security_finding(v: Vulnerability) -> dict:
-    category = normalize_security_category(v.source, v.package_name, v.vulnerability_id)
+    category = normalize_security_category(v.source, v.package_name, v.vulnerability_id, v.target)
     component = v.package_name or "Application"
     title = v.vulnerability_id or v.rule or "Security finding"
     fingerprint_source = "|".join([
@@ -2357,7 +2399,7 @@ def upload_vulnerabilities(payload: UploadPayload, db: Session = Depends(get_db)
                 fixed_version=v.fixed_version,
                 risk_score=v.risk_score,
                 description=v.description,
-                source=normalize_security_category(v.source, v.package_name, v.vulnerability_id),
+                source=normalize_security_category(v.source, v.package_name, v.vulnerability_id, v.target),
                 timestamp=datetime.utcnow(),
                 line=v.line,
                 rule=v.rule,
