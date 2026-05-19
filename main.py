@@ -305,15 +305,15 @@ class ProdDevopsPipelineRequest(BaseModel):
     artifact_prefix: str
     image_json_path: Optional[str] = None
     template_config_path: Optional[str] = None
-    source_env: str = "STAGE"
-    target_env: str = "PROD"
+    source_env: str = "DEV"
+    target_env: str = "QA"
     aws_region: str = "us-east-1"
     source_ecr_registry: Optional[str] = None
     source_ecr_repository: Optional[str] = None
     target_ecr_registry: Optional[str] = None
     target_ecr_repository: Optional[str] = None
     source_image_tag: Optional[str] = None
-    target_image_tag: str = "prod"
+    target_image_tag: Optional[str] = None
     client_aws_role_arn: Optional[str] = None
     source_aws_role_arn: Optional[str] = None
     target_aws_role_arn: Optional[str] = None
@@ -330,6 +330,7 @@ class ProdDevopsPipelineRequest(BaseModel):
     secret_enabled: bool = False
     xid_array: Optional[str] = None
     approver: Optional[str] = None
+    require_approval: bool = False
     notify_email: Optional[str] = None
     additional_notify_emails: Optional[str] = None
     enable_notifications: bool = False
@@ -1794,16 +1795,32 @@ main_template([
 
 @app.post("/prod/devops/pipeline")
 def create_prod_devops_pipeline(request: ProdDevopsPipelineRequest, db: Session = Depends(get_db)):
-    job_name = f"{request.project_name.strip()}-prod"
     if not request.project_name.strip():
         return JSONResponse(status_code=400, content={"error": "project_name is required"})
-    if "PROD" not in (request.target_env or "").upper():
-        return JSONResponse(status_code=400, content={"error": "Prod DevOps Pipeline only supports PROD target environments"})
+    project_name = request.project_name.strip()
+    source_env = normalize_environment_name(request.source_env)
+    target_env = normalize_environment_name(request.target_env)
+    if source_env == target_env:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Source and target environments must be different for release promotion"},
+        )
+    if source_env not in {"DEV", "QA", "STAGE"}:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Release promotion source must be DEV, QA, or STAGE"},
+        )
+    if target_env not in {"QA", "STAGE", "PROD"}:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Release promotion target must be QA, STAGE, or PROD"},
+        )
+    job_name = f"{project_name}-{target_env.lower()}-release"
 
-    source_env_values, source_env_error = resolve_environment_catalog_values(db, request.source_env, request.project_name.strip(), request)
+    source_env_values, source_env_error = resolve_environment_catalog_values(db, source_env, project_name, request)
     if source_env_error:
         return JSONResponse(status_code=400, content={"error": source_env_error, "status": "source_environment_catalog_missing"})
-    target_env_values, target_env_error = resolve_environment_catalog_values(db, request.target_env, request.project_name.strip(), request)
+    target_env_values, target_env_error = resolve_environment_catalog_values(db, target_env, project_name, request)
     if target_env_error:
         return JSONResponse(status_code=400, content={"error": target_env_error, "status": "target_environment_catalog_missing"})
 
@@ -1811,28 +1828,29 @@ def create_prod_devops_pipeline(request: ProdDevopsPipelineRequest, db: Session 
         field for field in ["ARTIFACT_BUCKET", "ECR_REGISTRY", "ECR_REPOSITORY", "SOURCE_AWS_ROLE_ARN"]
         if not source_env_values.get(field)
     ]
+    target_cluster_field = f"{target_env}_CLUSTER_NAME"
     missing_catalog_fields += [
-        field for field in ["ECR_REGISTRY", "ECR_REPOSITORY", "TARGET_AWS_ROLE_ARN", "PROD_CLUSTER_NAME"]
+        field for field in ["ECR_REGISTRY", "ECR_REPOSITORY", "TARGET_AWS_ROLE_ARN", target_cluster_field]
         if not target_env_values.get(field)
     ]
     if missing_catalog_fields:
         return JSONResponse(
             status_code=400,
             content={
-                "error": "Environment Catalog is missing required production promotion settings.",
+                "error": "Environment Catalog is missing required release promotion settings.",
                 "missing_fields": sorted(set(missing_catalog_fields)),
                 "source_env": source_env_values["TARGET_ENV"],
                 "target_env": target_env_values["TARGET_ENV"],
             },
         )
 
-    source_preflight = run_environment_preflight(db, request.source_env, request.project_name.strip(), request, pipeline_kind="PROD_DEVOPS_SOURCE")
-    target_preflight = run_environment_preflight(db, request.target_env, request.project_name.strip(), request, pipeline_kind="PROD_DEVOPS")
+    source_preflight = run_environment_preflight(db, source_env, project_name, request, pipeline_kind="PROD_DEVOPS_SOURCE")
+    target_preflight = run_environment_preflight(db, target_env, project_name, request, pipeline_kind="PROD_DEVOPS")
     if ENVIRONMENT_PREFLIGHT_ENFORCED and (not source_preflight.get("ready") or not target_preflight.get("ready")):
         return JSONResponse(
             status_code=400,
             content={
-                "error": "Source or target environment is not ready for production promotion.",
+                "error": "Source or target environment is not ready for release promotion.",
                 "status": "environment_not_ready",
                 "preflight": {
                     "source": source_preflight,
@@ -1872,7 +1890,7 @@ def create_prod_devops_pipeline(request: ProdDevopsPipelineRequest, db: Session 
         "LICENSED_FEATURES": ",".join(validated_license.get("enabled_features") or []),
         "LICENSED_ENVIRONMENTS": ",".join(validated_license.get("allowed_environments") or []),
         "LICENSE_VALIDATION_MODE": str(validated_license.get("validation_mode") or "unknown"),
-        "PROJECT_NAME": request.project_name.strip(),
+        "PROJECT_NAME": project_name,
         "PIPELINE_KIND": "PROD_DEVOPS",
         "SERVICE_NAME": "Prod Devops Pipeline",
         "REQUESTED_BY": request.requestedBy,
@@ -1888,7 +1906,7 @@ def create_prod_devops_pipeline(request: ProdDevopsPipelineRequest, db: Session 
         "TARGET_ECR_REGISTRY": (request.target_ecr_registry or target_env_values["ECR_REGISTRY"]).strip(),
         "TARGET_ECR_REPOSITORY": (request.target_ecr_repository or target_env_values["ECR_REPOSITORY"]).strip(),
         "SOURCE_IMAGE_TAG": (request.source_image_tag or "").strip(),
-        "TARGET_IMAGE_TAG": request.target_image_tag.strip() or "prod",
+        "TARGET_IMAGE_TAG": (request.target_image_tag or "").strip(),
         "CLIENT_AWS_ROLE_ARN": (request.client_aws_role_arn or target_env_values["CLIENT_AWS_ROLE_ARN"] or source_env_values["CLIENT_AWS_ROLE_ARN"]).strip(),
         "SOURCE_AWS_ROLE_ARN": (request.source_aws_role_arn or source_env_values["SOURCE_AWS_ROLE_ARN"] or source_env_values["CLIENT_AWS_ROLE_ARN"]).strip(),
         "TARGET_AWS_ROLE_ARN": (request.target_aws_role_arn or target_env_values["TARGET_AWS_ROLE_ARN"] or target_env_values["CLIENT_AWS_ROLE_ARN"]).strip(),
@@ -1907,6 +1925,7 @@ def create_prod_devops_pipeline(request: ProdDevopsPipelineRequest, db: Session 
         "SECRET_ENABLED": str(request.secret_enabled).lower(),
         "XID_ARRAY": (request.xid_array or "").strip(),
         "APPROVER": (request.approver or "").strip(),
+        "REQUIRE_APPROVAL": str(request.require_approval or target_env == "PROD").lower(),
         "NOTIFY_EMAIL": (request.notify_email or "").strip(),
         "NOTIFY_CC": (request.additional_notify_emails or "").strip(),
         "ENABLE_NOTIFICATIONS": str(notification_requested).lower(),
@@ -1914,7 +1933,7 @@ def create_prod_devops_pipeline(request: ProdDevopsPipelineRequest, db: Session 
     }
     xml_values = {k: escape(v, quote=True) for k, v in values.items()}
 
-    bool_param_names = ["SECRET_ENABLED", "ENABLE_NOTIFICATIONS"]
+    bool_param_names = ["SECRET_ENABLED", "REQUIRE_APPROVAL", "ENABLE_NOTIFICATIONS"]
     string_param_names = [name for name in values.keys() if name not in bool_param_names]
 
     parameter_definitions = []
@@ -1935,7 +1954,7 @@ def create_prod_devops_pipeline(request: ProdDevopsPipelineRequest, db: Session 
 
     job_config = f"""
 <flow-definition plugin="workflow-job">
-  <description>Prod Devops Pipeline for {xml_values["PROJECT_NAME"]}</description>
+  <description>Release Promotion Pipeline for {xml_values["PROJECT_NAME"]}</description>
   <properties>
     <hudson.model.ParametersDefinitionProperty>
       <parameterDefinitions>
@@ -1988,6 +2007,7 @@ main_template([
   SECRET_ENABLED: "${{SECRET_ENABLED}}",
   XID_ARRAY: "${{XID_ARRAY}}",
   APPROVER: "${{APPROVER}}",
+  REQUIRE_APPROVAL: "${{REQUIRE_APPROVAL}}",
   NOTIFY_EMAIL: "${{NOTIFY_EMAIL}}",
   NOTIFY_CC: "${{NOTIFY_CC}}",
   ENABLE_NOTIFICATIONS: "${{ENABLE_NOTIFICATIONS}}",
@@ -2031,8 +2051,8 @@ main_template([
         return jenkins_failure_response(f"trigger build for job '{job_name}'", build_response)
 
     return {
-        "status": f"Prod Devops pipeline {create_status} and triggered",
-        "project_name": request.project_name,
+        "status": f"Release promotion pipeline {create_status} and triggered",
+        "project_name": project_name,
         "job_name": job_name,
         "license": license_summary_doc,
         "environment_preflight": {

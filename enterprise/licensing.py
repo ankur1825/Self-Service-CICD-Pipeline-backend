@@ -96,7 +96,7 @@ def default_license_from_env() -> Dict[str, Any]:
         "expires_at": os.getenv("ENTERPRISE_LICENSE_EXPIRES_AT", "2099-12-31T23:59:59Z"),
         "enabled_pipelines": _split_csv(os.getenv("ENTERPRISE_ENABLED_PIPELINES", "Devops Pipeline,Test Devops Pipeline,Prod Devops Pipeline")),
         "enabled_features": _split_csv(os.getenv("ENTERPRISE_ENABLED_FEATURES", "build,artifact_publish,code_scan,image_scan,policy_validation,static_application_security,test_suites,notifications,secret_management,prod_deploy,ai_remediation")),
-        "allowed_environments": _split_csv(os.getenv("ENTERPRISE_ALLOWED_ENVIRONMENTS", "DEV,QA,STAGE,EKS-NONPROD,EKS-PROD")),
+        "allowed_environments": _split_csv(os.getenv("ENTERPRISE_ALLOWED_ENVIRONMENTS", "DEV,QA,STAGE,PROD,EKS-NONPROD,EKS-PROD")),
         "allowed_aws_account_ids": _split_csv(os.getenv("ENTERPRISE_ALLOWED_AWS_ACCOUNT_IDS", "")),
         "installation_id": os.getenv("ENTERPRISE_INSTALLATION_ID", ""),
         "max_repos": int(os.getenv("ENTERPRISE_MAX_REPOS", "999999")),
