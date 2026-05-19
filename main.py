@@ -2325,14 +2325,20 @@ def grant_access(request: GrantAccessRequest, db: Session = Depends(get_db)):
 @app.post("/upload_vulnerabilities")
 def upload_vulnerabilities(payload: UploadPayload, db: Session = Depends(get_db)):
     try:
+        repo_url = (payload.repo_url or "N/A").strip()
         app_entry = db.query(Application).filter_by(name=payload.application).first()
+        if not app_entry and repo_url and repo_url != "N/A":
+            app_entry = db.query(Application).filter_by(repo_url=repo_url).first()
+            if app_entry:
+                app_entry.name = payload.application or app_entry.name
+                app_entry.owner_email = payload.requestedBy or app_entry.owner_email
 
         if not app_entry:
             app_entry = Application(
                 name=payload.application,
                 description="Auto-created",
                 owner_email=payload.requestedBy or "unknown@horizonrelevance.com",
-                repo_url=payload.repo_url or "N/A"
+                repo_url=repo_url
             )
             db.add(app_entry)
             db.commit()
