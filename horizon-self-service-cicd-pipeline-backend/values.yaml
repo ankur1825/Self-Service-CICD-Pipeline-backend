@@ -98,6 +98,8 @@ enterprise:
   licenseFile: ""
   licenseMode: offline-file
   licenseSyncEndpoint: ""
+  licenseUsageReportingEnabled: false
+  licenseUsageEndpoint: ""
   licenseCacheFile: /app/data/enterprise-license-cache.json
   activationTokenSecret:
     existingSecret: ""

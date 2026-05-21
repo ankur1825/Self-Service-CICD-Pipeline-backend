@@ -1163,6 +1163,82 @@ def _license_sync_identity(current_license: Dict[str, Any]) -> Dict[str, str]:
         "product_version": _first_non_empty(os.getenv("ENTERPRISE_PRODUCT_VERSION"), os.getenv("PRODUCT_VERSION")),
     }
 
+def _license_usage_endpoint() -> str:
+    explicit_endpoint = os.getenv("ENTERPRISE_LICENSE_USAGE_ENDPOINT", "").strip()
+    if explicit_endpoint:
+        return explicit_endpoint
+    sync_endpoint = os.getenv("ENTERPRISE_LICENSE_SYNC_ENDPOINT", "").strip()
+    if sync_endpoint.endswith("/api/v1/licenses/sync"):
+        return sync_endpoint.replace("/api/v1/licenses/sync", "/api/v1/licenses/usage")
+    return ""
+
+def _license_usage_reporting_enabled() -> bool:
+    return os.getenv("ENTERPRISE_LICENSE_USAGE_REPORTING_ENABLED", "false").strip().lower() == "true"
+
+def _license_usage_status() -> Dict[str, Any]:
+    endpoint = _license_usage_endpoint()
+    return {
+        "usage_reporting_enabled": _license_usage_reporting_enabled(),
+        "usage_endpoint_configured": bool(endpoint),
+    }
+
+def report_license_usage(validated_license: Dict[str, Any], event_type: str, *, quantity: int = 1, metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    endpoint = _license_usage_endpoint()
+    if not _license_usage_reporting_enabled():
+        return {"status": "disabled", "reported": False}
+    if not endpoint:
+        return {"status": "skipped", "reported": False, "reason": "ENTERPRISE_LICENSE_USAGE_ENDPOINT is not configured"}
+
+    current_license = default_license_from_env()
+    identity = _license_sync_identity(current_license)
+    client_id = _first_non_empty(validated_license.get("client_id"), identity.get("client_id"))
+    installation_id = _first_non_empty(validated_license.get("installation_id"), identity.get("installation_id"))
+    license_key = _first_non_empty(validated_license.get("license_key"), current_license.get("license_key"))
+    if not client_id or not installation_id or not license_key:
+        return {
+            "status": "skipped",
+            "reported": False,
+            "reason": "client_id, installation_id, and license_key are required for usage reporting",
+        }
+
+    payload = {
+        "client_id": client_id,
+        "installation_id": installation_id,
+        "license_key": license_key,
+        "event_type": event_type,
+        "quantity": quantity,
+        "metadata": metadata or {},
+    }
+    try:
+        response = requests.post(endpoint, json=payload, timeout=10)
+        if response.status_code >= 400:
+            try:
+                response_body = response.json()
+            except ValueError:
+                response_body = {"error": response.text}
+            logger.warning("License usage reporting failed: %s", response_body)
+            return {
+                "status": "failed",
+                "reported": False,
+                "license_service_status": response.status_code,
+                "error": response_body.get("detail") or response_body.get("error") or "Usage reporting failed",
+            }
+        try:
+            response_body = response.json()
+        except ValueError:
+            response_body = {}
+        response_body.setdefault("status", "recorded")
+        response_body["reported"] = True
+        return response_body
+    except requests.RequestException as exc:
+        logger.warning("License usage reporting skipped because Horizon license service is unreachable: %s", exc)
+        return {"status": "failed", "reported": False, "error": str(exc)}
+
+def _usage_requester_hash(requested_by: str) -> str:
+    if not requested_by:
+        return ""
+    return hashlib.sha256(requested_by.encode("utf-8")).hexdigest()[:16]
+
 @app.get("/license/status")
 def get_license_status():
     license_doc = default_license_from_env()
@@ -1179,6 +1255,7 @@ def get_license_status():
             and os.getenv("ENTERPRISE_LICENSE_SYNC_ENDPOINT", "").strip()
             and os.getenv("ENTERPRISE_LICENSE_ACTIVATION_TOKEN", "").strip()
         )
+        summary.update(_license_usage_status())
         return summary
     except LicenseValidationError as exc:
         license_doc["status"] = "invalid"
@@ -1189,6 +1266,7 @@ def get_license_status():
             and os.getenv("ENTERPRISE_LICENSE_SYNC_ENDPOINT", "").strip()
             and os.getenv("ENTERPRISE_LICENSE_ACTIVATION_TOKEN", "").strip()
         )
+        summary.update(_license_usage_status())
         return JSONResponse(status_code=403, content=summary)
 
 @app.post("/license/validate")
@@ -1641,6 +1719,22 @@ main_template([
     if build_response.status_code not in (200, 201, 202):
         return jenkins_failure_response(f"trigger build for job '{job_name}'", build_response)
 
+    usage_report = report_license_usage(
+        validated_license,
+        "pipeline.build_deploy.requested",
+        metadata={
+            "pipeline_kind": "DEVOPS",
+            "project_name": job_name,
+            "project_type": request.project_type,
+            "target_env": env_values["TARGET_ENV"],
+            "namespace": env_values["APP_NAMESPACE"],
+            "branch": request.branch.strip() or "main",
+            "repo_type": request.repo_type,
+            "jenkins_job": job_name,
+            "requester_hash": _usage_requester_hash(request.requestedBy),
+        },
+    )
+
     return {
         "status": f"Devops pipeline {create_status} and triggered",
         "project_name": job_name,
@@ -1648,6 +1742,7 @@ main_template([
         "target_env": env_values["TARGET_ENV"],
         "namespace": env_values["APP_NAMESPACE"],
         "license": license_summary_doc,
+        "usage_report": usage_report,
         "environment_preflight": preflight,
         "create_response_code": create_response_code,
         "build_response_code": build_response.status_code,
@@ -1833,12 +1928,37 @@ main_template([
     if build_response.status_code not in (200, 201, 202):
         return jenkins_failure_response(f"trigger build for job '{job_name}'", build_response)
 
+    usage_report = report_license_usage(
+        validated_license,
+        "pipeline.validation.requested",
+        metadata={
+            "pipeline_kind": "TEST_DEVOPS",
+            "project_name": request.project_name.strip(),
+            "project_type": request.project_type,
+            "target_env": env_values["TARGET_ENV"],
+            "branch": request.branch.strip() or "main",
+            "repo_type": request.repo_type,
+            "jenkins_job": job_name,
+            "requester_hash": _usage_requester_hash(request.requestedBy),
+            "validation_gates": {
+                "ui_end_to_end": bool(request.ENABLE_SELENIUM),
+                "api_regression": bool(request.ENABLE_NEWMAN),
+                "performance": bool(request.ENABLE_JMETER),
+                "code_quality": bool(request.ENABLE_SONARQUBE),
+                "static_security": bool(request.ENABLE_CHECKMARX),
+                "container_iac_vulnerability": bool(request.ENABLE_TRIVY),
+                "policy_validation": bool(request.ENABLE_OPA),
+            },
+        },
+    )
+
     return {
         "status": f"Test Devops pipeline {create_status} and triggered",
         "project_name": request.project_name.strip(),
         "jenkins_job": job_name,
         "project_type": request.project_type,
         "license": license_summary(validated_license),
+        "usage_report": usage_report,
         "environment_preflight": preflight,
         "create_response_code": create_response_code,
         "build_response_code": build_response.status_code,
@@ -2101,11 +2221,30 @@ main_template([
     if build_response.status_code not in (200, 201, 202):
         return jenkins_failure_response(f"trigger build for job '{job_name}'", build_response)
 
+    usage_report = report_license_usage(
+        validated_license,
+        "pipeline.release_promotion.requested",
+        metadata={
+            "pipeline_kind": "PROD_DEVOPS",
+            "project_name": project_name,
+            "source_env": source_env_values["TARGET_ENV"],
+            "target_env": target_env_values["TARGET_ENV"],
+            "source_image_tag": values["SOURCE_IMAGE_TAG"],
+            "target_image_tag": values["TARGET_IMAGE_TAG"],
+            "artifact_prefix": artifact_prefix,
+            "target_namespace": target_env_values["APP_NAMESPACE"],
+            "jenkins_job": job_name,
+            "requester_hash": _usage_requester_hash(request.requestedBy),
+            "approval_required": bool(request.require_approval or target_env == "PROD"),
+        },
+    )
+
     return {
         "status": f"Release promotion pipeline {create_status} and triggered",
         "project_name": project_name,
         "job_name": job_name,
         "license": license_summary_doc,
+        "usage_report": usage_report,
         "environment_preflight": {
             "source": source_preflight,
             "target": target_preflight,

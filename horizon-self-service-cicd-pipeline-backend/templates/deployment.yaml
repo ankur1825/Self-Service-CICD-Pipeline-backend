@@ -131,6 +131,10 @@ spec:
               value: {{ .Values.enterprise.licenseMode | quote }}
             - name: ENTERPRISE_LICENSE_SYNC_ENDPOINT
               value: {{ .Values.enterprise.licenseSyncEndpoint | quote }}
+            - name: ENTERPRISE_LICENSE_USAGE_REPORTING_ENABLED
+              value: {{ .Values.enterprise.licenseUsageReportingEnabled | quote }}
+            - name: ENTERPRISE_LICENSE_USAGE_ENDPOINT
+              value: {{ .Values.enterprise.licenseUsageEndpoint | quote }}
             - name: ENTERPRISE_LICENSE_CACHE_FILE
               value: {{ .Values.enterprise.licenseCacheFile | quote }}
             {{- if .Values.enterprise.activationTokenSecret.existingSecret }}
