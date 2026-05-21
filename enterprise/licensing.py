@@ -197,7 +197,10 @@ def license_summary(license_doc: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "client_id": license_doc.get("client_id"),
         "client_name": license_doc.get("client_name"),
+        "license_key": license_doc.get("license_key"),
         "license_type": license_doc.get("license_type"),
+        "issuer": license_doc.get("issuer"),
+        "issued_at": license_doc.get("issued_at"),
         "expires_at": license_doc.get("expires_at"),
         "enabled_pipelines": license_doc.get("enabled_pipelines", []),
         "enabled_features": license_doc.get("enabled_features", []),
@@ -211,4 +214,5 @@ def license_summary(license_doc: Dict[str, Any]) -> Dict[str, Any]:
         "validation_mode": license_doc.get("validation_mode", "unknown"),
         "license_mode": license_doc.get("license_mode") or os.getenv("ENTERPRISE_LICENSE_MODE", "offline-file"),
         "last_synced_at": license_doc.get("last_synced_at"),
+        "limits": license_doc.get("limits", {}),
     }

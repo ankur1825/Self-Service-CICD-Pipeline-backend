@@ -89,6 +89,9 @@ enterprise:
   allowedEnvironments: "DEV,QA,STAGE,PROD,EKS-NONPROD,EKS-PROD"
   allowedAwsAccountIds: ""
   installationId: ""
+  awsAccountId: ""
+  awsRegion: us-east-1
+  productVersion: "1.4.22"
   maxRepos: "999999"
   maxBuildsPerMonth: "999999"
   maxUsers: "999999"

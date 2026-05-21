@@ -113,6 +113,12 @@ spec:
               value: {{ .Values.enterprise.allowedAwsAccountIds | quote }}
             - name: ENTERPRISE_INSTALLATION_ID
               value: {{ .Values.enterprise.installationId | quote }}
+            - name: ENTERPRISE_AWS_ACCOUNT_ID
+              value: {{ .Values.enterprise.awsAccountId | quote }}
+            - name: ENTERPRISE_AWS_REGION
+              value: {{ .Values.enterprise.awsRegion | quote }}
+            - name: ENTERPRISE_PRODUCT_VERSION
+              value: {{ .Values.enterprise.productVersion | quote }}
             - name: ENTERPRISE_MAX_REPOS
               value: {{ .Values.enterprise.maxRepos | quote }}
             - name: ENTERPRISE_MAX_BUILDS_PER_MONTH

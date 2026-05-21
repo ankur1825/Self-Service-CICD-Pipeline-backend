@@ -1138,6 +1138,31 @@ def save_environment_catalog(request: EnvironmentCatalogRequest, db: Session = D
     entries = db.query(EnvironmentCatalog).order_by(EnvironmentCatalog.name.asc()).all()
     return {"status": "saved", "environments": [catalog_entry_to_dict(entry) for entry in entries]}
 
+def _first_non_empty(*values: Optional[str]) -> str:
+    for value in values:
+        if value and str(value).strip():
+            return str(value).strip()
+    return ""
+
+def _license_sync_identity(current_license: Dict[str, Any]) -> Dict[str, str]:
+    return {
+        "client_id": _first_non_empty(os.getenv("ENTERPRISE_CLIENT_ID"), current_license.get("client_id")),
+        "client_name": _first_non_empty(os.getenv("ENTERPRISE_CLIENT_NAME"), current_license.get("client_name")),
+        "installation_id": _first_non_empty(os.getenv("ENTERPRISE_INSTALLATION_ID"), current_license.get("installation_id")),
+        "aws_account_id": _first_non_empty(
+            os.getenv("ENTERPRISE_AWS_ACCOUNT_ID"),
+            os.getenv("AWS_ACCOUNT_ID"),
+            current_license.get("aws_account_id"),
+        ),
+        "region": _first_non_empty(
+            os.getenv("ENTERPRISE_AWS_REGION"),
+            os.getenv("AWS_REGION"),
+            os.getenv("AWS_DEFAULT_REGION"),
+            current_license.get("region"),
+        ),
+        "product_version": _first_non_empty(os.getenv("ENTERPRISE_PRODUCT_VERSION"), os.getenv("PRODUCT_VERSION")),
+    }
+
 @app.get("/license/status")
 def get_license_status():
     license_doc = default_license_from_env()
@@ -1148,11 +1173,22 @@ def get_license_status():
             target_env="EKS-NONPROD",
             requested_features=[],
         )
-        return license_summary(validated)
+        summary = license_summary(validated)
+        summary["sync_available"] = bool(
+            os.getenv("ENTERPRISE_LICENSE_MODE", "offline-file").strip().lower() == "online-sync"
+            and os.getenv("ENTERPRISE_LICENSE_SYNC_ENDPOINT", "").strip()
+            and os.getenv("ENTERPRISE_LICENSE_ACTIVATION_TOKEN", "").strip()
+        )
+        return summary
     except LicenseValidationError as exc:
         license_doc["status"] = "invalid"
         summary = license_summary(license_doc)
         summary["error"] = str(exc)
+        summary["sync_available"] = bool(
+            os.getenv("ENTERPRISE_LICENSE_MODE", "offline-file").strip().lower() == "online-sync"
+            and os.getenv("ENTERPRISE_LICENSE_SYNC_ENDPOINT", "").strip()
+            and os.getenv("ENTERPRISE_LICENSE_ACTIVATION_TOKEN", "").strip()
+        )
         return JSONResponse(status_code=403, content=summary)
 
 @app.post("/license/validate")
@@ -1190,10 +1226,20 @@ def sync_enterprise_license(request: LicenseSyncRequest):
     if not activation_token:
         return JSONResponse(status_code=400, content={"error": "ENTERPRISE_LICENSE_ACTIVATION_TOKEN is required.", "status": "sync_failed"})
 
+    identity = _license_sync_identity(current_license)
+    if not identity["client_id"]:
+        return JSONResponse(status_code=400, content={"error": "ENTERPRISE_CLIENT_ID is required for online license sync.", "status": "sync_failed"})
+    if not identity["installation_id"]:
+        return JSONResponse(status_code=400, content={"error": "ENTERPRISE_INSTALLATION_ID is required for online license sync.", "status": "sync_failed"})
+
     payload = {
-        "client_id": current_license.get("client_id") or os.getenv("ENTERPRISE_CLIENT_ID", ""),
-        "client_name": current_license.get("client_name") or os.getenv("ENTERPRISE_CLIENT_NAME", ""),
+        "client_id": identity["client_id"],
+        "client_name": identity["client_name"],
+        "installation_id": identity["installation_id"],
         "activation_token": activation_token,
+        "aws_account_id": identity["aws_account_id"],
+        "region": identity["region"],
+        "product_version": identity["product_version"],
         "current_license_key": current_license.get("license_key", ""),
         "current_expires_at": current_license.get("expires_at", ""),
         "force": bool(request.force),
@@ -1201,6 +1247,10 @@ def sync_enterprise_license(request: LicenseSyncRequest):
             "product": "Horizon Relevance AI DevSecOps Platform",
             "backend_root_path": "/pipeline/api",
             "license_mode": license_mode,
+            "jenkins_url": JENKINS_URL,
+            "environment_preflight_enforced": ENVIRONMENT_PREFLIGHT_ENFORCED,
+            "environment_iam_mode": ENVIRONMENT_IAM_MODE,
+            "environment_eks_access_mode": ENVIRONMENT_EKS_ACCESS_MODE,
         },
     }
 
@@ -1239,6 +1289,7 @@ def sync_enterprise_license(request: LicenseSyncRequest):
     cached = save_cached_license(validated)
     summary = license_summary(cached)
     summary["status"] = "active"
+    summary["sync_available"] = True
     summary["message"] = response_body.get("message", "License synced successfully.")
     return summary
 
