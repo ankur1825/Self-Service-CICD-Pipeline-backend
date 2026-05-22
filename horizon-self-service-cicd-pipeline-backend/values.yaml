@@ -4,7 +4,7 @@ replicaCount: 1
 
 image:
   repository: 426946630837.dkr.ecr.us-east-1.amazonaws.com/horizon/backend
-  tag: "1.4.29"
+  tag: "1.4.31"
   pullPolicy: Always
 
 service:
@@ -84,14 +84,14 @@ enterprise:
   licenseKey: internal-dev-license
   licenseType: internal
   licenseExpiresAt: "2099-12-31T23:59:59Z"
-  enabledPipelines: "Devops Pipeline,Test Devops Pipeline,Prod Devops Pipeline"
+  enabledPipelines: "Build & Deploy Pipeline,Validation Pipeline,Release Promotion Pipeline"
   enabledFeatures: "build,artifact_publish,code_scan,image_scan,policy_validation,static_application_security,test_suites,notifications,secret_management,prod_deploy,ai_remediation"
   allowedEnvironments: "DEV,QA,STAGE,PROD,EKS-NONPROD,EKS-PROD"
   allowedAwsAccountIds: ""
   installationId: ""
   awsAccountId: ""
   awsRegion: us-east-1
-  productVersion: "1.4.29"
+  productVersion: "1.4.31"
   maxRepos: "999999"
   maxBuildsPerMonth: "999999"
   maxUsers: "999999"

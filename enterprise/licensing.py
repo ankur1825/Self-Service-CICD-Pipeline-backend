@@ -18,7 +18,14 @@ def license_enforcement_enabled() -> bool:
 
 
 def _canonical_payload(payload: Dict[str, Any]) -> bytes:
-    signed_payload = {k: v for k, v in payload.items() if k not in {"signature", "license_signature"}}
+    runtime_fields = {
+        "last_synced_at",
+        "license_signature",
+        "signature",
+        "status",
+        "validation_mode",
+    }
+    signed_payload = {k: v for k, v in payload.items() if k not in runtime_fields}
     return json.dumps(signed_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
@@ -226,7 +233,7 @@ def default_license_from_env() -> Dict[str, Any]:
         "license_key": os.getenv("ENTERPRISE_LICENSE_KEY", "internal-dev-license"),
         "license_type": os.getenv("ENTERPRISE_LICENSE_TYPE", "internal"),
         "expires_at": os.getenv("ENTERPRISE_LICENSE_EXPIRES_AT", "2099-12-31T23:59:59Z"),
-        "enabled_pipelines": _split_csv(os.getenv("ENTERPRISE_ENABLED_PIPELINES", "Devops Pipeline,Test Devops Pipeline,Prod Devops Pipeline")),
+        "enabled_pipelines": _split_csv(os.getenv("ENTERPRISE_ENABLED_PIPELINES", "Build & Deploy Pipeline,Validation Pipeline,Release Promotion Pipeline")),
         "enabled_features": _split_csv(os.getenv("ENTERPRISE_ENABLED_FEATURES", "build,artifact_publish,code_scan,image_scan,policy_validation,static_application_security,test_suites,notifications,secret_management,prod_deploy,ai_remediation")),
         "allowed_environments": _split_csv(os.getenv("ENTERPRISE_ALLOWED_ENVIRONMENTS", "DEV,QA,STAGE,PROD,EKS-NONPROD,EKS-PROD")),
         "allowed_aws_account_ids": _split_csv(os.getenv("ENTERPRISE_ALLOWED_AWS_ACCOUNT_IDS", "")),

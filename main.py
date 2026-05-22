@@ -348,7 +348,7 @@ class LicenseValidationRequest(BaseModel):
     allowed_environments: Optional[List[str]] = None
     allowed_aws_account_ids: Optional[List[str]] = None
     installation_id: Optional[str] = None
-    pipeline_name: str = "Devops Pipeline"
+    pipeline_name: str = "Build & Deploy Pipeline"
     target_env: str = "EKS-NONPROD"
     requested_features: List[str] = []
 
@@ -1265,8 +1265,8 @@ def get_license_status():
     try:
         validated = validate_license(
             license_doc,
-            pipeline_name="Devops Pipeline",
-            target_env="EKS-NONPROD",
+            pipeline_name="Build & Deploy Pipeline",
+            target_env="DEV",
             requested_features=[],
         )
         summary = license_summary(validated)
@@ -1379,7 +1379,7 @@ def sync_enterprise_license(request: LicenseSyncRequest):
     try:
         validated = validate_license(
             synced_license,
-            pipeline_name="Devops Pipeline",
+            pipeline_name="Build & Deploy Pipeline",
             target_env=(synced_license.get("allowed_environments") or ["DEV"])[0],
             requested_features=[],
         )
@@ -1667,7 +1667,7 @@ def create_devops_pipeline(request: DevopsPipelineRequest, db: Session = Depends
     try:
         validated_license = validate_license(
             license_doc,
-            pipeline_name="Devops Pipeline",
+            pipeline_name="Build & Deploy Pipeline",
             target_env=env_values["TARGET_ENV"],
             requested_features=requested_devops_features(request),
             aws_account_id=env_values.get("AWS_ACCOUNT_ID") or aws_account_id_from_registry(env_values.get("ECR_REGISTRY")),
@@ -1692,7 +1692,7 @@ def create_devops_pipeline(request: DevopsPipelineRequest, db: Session = Depends
         "BRANCH": request.branch.strip() or "main",
         "CREDENTIALS_ID": "github-token",
         "PIPELINE_KIND": "DEVOPS",
-        "SERVICE_NAME": "Devops Pipeline",
+        "SERVICE_NAME": "Build & Deploy Pipeline",
         "REQUESTED_BY": request.requestedBy,
         "ENABLE_SONARQUBE": "false",
         "ENABLE_CHECKMARX": "false",
@@ -1757,7 +1757,7 @@ def create_devops_pipeline(request: DevopsPipelineRequest, db: Session = Depends
     params_map = "\n".join([f'  {name}: "${{{name}}}",' for name in values.keys()]).rstrip(',')
     job_config = f"""
 <flow-definition plugin="workflow-job">
-  <description>Devops Pipeline for {xml_values["PROJECT_NAME"]}</description>
+  <description>Build & Deploy Pipeline for {xml_values["PROJECT_NAME"]}</description>
   <properties>
     <hudson.model.ParametersDefinitionProperty>
       <parameterDefinitions>
@@ -1867,7 +1867,7 @@ def create_test_devops_pipeline(request: TestDevopsPipelineRequest, db: Session 
     try:
         validated_license = validate_license(
             license_doc,
-            pipeline_name="Test Devops Pipeline",
+            pipeline_name="Validation Pipeline",
             target_env=env_values["TARGET_ENV"],
             requested_features=requested_test_devops_features(request),
             aws_account_id=aws_account_id_from_registry(request.image_uri or "") or env_values.get("AWS_ACCOUNT_ID"),
@@ -1897,7 +1897,7 @@ def create_test_devops_pipeline(request: TestDevopsPipelineRequest, db: Session 
         "BRANCH": request.branch.strip() or "main",
         "CREDENTIALS_ID": "github-token",
         "PIPELINE_KIND": "TEST_DEVOPS",
-        "SERVICE_NAME": "Test Devops Pipeline",
+        "SERVICE_NAME": "Validation Pipeline",
         "REQUESTED_BY": request.requestedBy,
         "ENABLE_SONARQUBE": str(request.ENABLE_SONARQUBE).lower(),
         "ENABLE_CHECKMARX": str(request.ENABLE_CHECKMARX).lower(),
@@ -1966,7 +1966,7 @@ def create_test_devops_pipeline(request: TestDevopsPipelineRequest, db: Session 
     params_map = "\n".join([f'  {name}: "${{{name}}}",' for name in values.keys()]).rstrip(',')
     job_config = f"""
 <flow-definition plugin="workflow-job">
-  <description>Test Devops Pipeline for {xml_values["PROJECT_NAME"]}</description>
+  <description>Validation Pipeline for {xml_values["PROJECT_NAME"]}</description>
   <properties>
     <hudson.model.ParametersDefinitionProperty>
       <parameterDefinitions>
@@ -2112,7 +2112,7 @@ def create_prod_devops_pipeline(request: ProdDevopsPipelineRequest, db: Session 
     try:
         validated_license = validate_license(
             license_doc,
-            pipeline_name="Prod Devops Pipeline",
+            pipeline_name="Release Promotion Pipeline",
             target_env=target_env_values["TARGET_ENV"],
             requested_features=requested_prod_devops_features(request),
             aws_account_id=target_env_values.get("AWS_ACCOUNT_ID") or aws_account_id_from_registry(target_env_values.get("ECR_REGISTRY")),
@@ -2141,7 +2141,7 @@ def create_prod_devops_pipeline(request: ProdDevopsPipelineRequest, db: Session 
         "LICENSE_VALIDATION_MODE": str(validated_license.get("validation_mode") or "unknown"),
         "PROJECT_NAME": project_name,
         "PIPELINE_KIND": "PROD_DEVOPS",
-        "SERVICE_NAME": "Prod Devops Pipeline",
+        "SERVICE_NAME": "Release Promotion Pipeline",
         "REQUESTED_BY": request.requestedBy,
         "ARTIFACT_BUCKET": (request.artifact_bucket or source_env_values["ARTIFACT_BUCKET"]).strip(),
         "ARTIFACT_PREFIX": artifact_prefix,
