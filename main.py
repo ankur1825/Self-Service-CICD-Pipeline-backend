@@ -355,6 +355,17 @@ class LicenseValidationRequest(BaseModel):
 class LicenseSyncRequest(BaseModel):
     force: Optional[bool] = False
 
+class LicenseUpgradeRequest(BaseModel):
+    requested_plan_code: Optional[str] = "enterprise-annual"
+    requested_license_type: Optional[str] = "enterprise"
+    requested_environments: Optional[List[str]] = None
+    requested_features: Optional[List[str]] = None
+    requested_user_count: Optional[int] = 0
+    requested_repo_count: Optional[int] = 0
+    requester_email: Optional[str] = None
+    message: Optional[str] = ""
+    metadata: Optional[Dict[str, Any]] = None
+
 class EnvironmentCatalogEntryRequest(BaseModel):
     name: str
     display_name: Optional[str] = None
@@ -1172,6 +1183,15 @@ def _license_usage_endpoint() -> str:
         return sync_endpoint.replace("/api/v1/licenses/sync", "/api/v1/licenses/usage")
     return ""
 
+def _license_upgrade_endpoint() -> str:
+    explicit_endpoint = os.getenv("ENTERPRISE_LICENSE_UPGRADE_ENDPOINT", "").strip()
+    if explicit_endpoint:
+        return explicit_endpoint
+    sync_endpoint = os.getenv("ENTERPRISE_LICENSE_SYNC_ENDPOINT", "").strip()
+    if sync_endpoint.endswith("/api/v1/licenses/sync"):
+        return sync_endpoint.replace("/api/v1/licenses/sync", "/api/v1/licenses/upgrade-requests")
+    return ""
+
 def _license_usage_reporting_enabled() -> bool:
     return os.getenv("ENTERPRISE_LICENSE_USAGE_REPORTING_ENABLED", "false").strip().lower() == "true"
 
@@ -1255,6 +1275,7 @@ def get_license_status():
             and os.getenv("ENTERPRISE_LICENSE_SYNC_ENDPOINT", "").strip()
             and os.getenv("ENTERPRISE_LICENSE_ACTIVATION_TOKEN", "").strip()
         )
+        summary["upgrade_available"] = bool(_license_upgrade_endpoint() and summary.get("client_id"))
         summary.update(_license_usage_status())
         return summary
     except LicenseValidationError as exc:
@@ -1266,6 +1287,7 @@ def get_license_status():
             and os.getenv("ENTERPRISE_LICENSE_SYNC_ENDPOINT", "").strip()
             and os.getenv("ENTERPRISE_LICENSE_ACTIVATION_TOKEN", "").strip()
         )
+        summary["upgrade_available"] = bool(_license_upgrade_endpoint() and summary.get("client_id"))
         summary.update(_license_usage_status())
         return JSONResponse(status_code=403, content=summary)
 
@@ -1368,8 +1390,64 @@ def sync_enterprise_license(request: LicenseSyncRequest):
     summary = license_summary(cached)
     summary["status"] = "active"
     summary["sync_available"] = True
+    summary["upgrade_available"] = bool(_license_upgrade_endpoint() and summary.get("client_id"))
     summary["message"] = response_body.get("message", "License synced successfully.")
     return summary
+
+@app.post("/license/upgrade-request")
+def request_license_upgrade(request: LicenseUpgradeRequest):
+    endpoint = _license_upgrade_endpoint()
+    current_license = default_license_from_env()
+    identity = _license_sync_identity(current_license)
+    if not endpoint:
+        return JSONResponse(status_code=400, content={"error": "ENTERPRISE_LICENSE_UPGRADE_ENDPOINT or ENTERPRISE_LICENSE_SYNC_ENDPOINT is required.", "status": "upgrade_unavailable"})
+    if not identity["client_id"]:
+        return JSONResponse(status_code=400, content={"error": "ENTERPRISE_CLIENT_ID is required before requesting an upgrade.", "status": "upgrade_failed"})
+    if not identity["installation_id"]:
+        return JSONResponse(status_code=400, content={"error": "ENTERPRISE_INSTALLATION_ID is required before requesting an upgrade.", "status": "upgrade_failed"})
+
+    requested_environments = request.requested_environments or current_license.get("allowed_environments") or []
+    requested_features = request.requested_features or current_license.get("enabled_features") or []
+    payload = {
+        "client_id": identity["client_id"],
+        "installation_id": identity["installation_id"],
+        "current_license_key": current_license.get("license_key", ""),
+        "requested_plan_code": request.requested_plan_code or "enterprise-annual",
+        "requested_license_type": request.requested_license_type or "enterprise",
+        "requested_environments": requested_environments,
+        "requested_features": requested_features,
+        "requested_user_count": int(request.requested_user_count or 0),
+        "requested_repo_count": int(request.requested_repo_count or 0),
+        "requester_email": request.requester_email or "",
+        "message": request.message or "",
+        "metadata": {
+            **(request.metadata or {}),
+            "client_name": identity["client_name"],
+            "aws_account_id": identity["aws_account_id"],
+            "region": identity["region"],
+            "product_version": identity["product_version"],
+            "license_mode": os.getenv("ENTERPRISE_LICENSE_MODE", "offline-file"),
+        },
+    }
+
+    try:
+        response = requests.post(endpoint, json=payload, timeout=15)
+    except requests.RequestException as exc:
+        logger.exception("License upgrade request failed while calling Horizon license service")
+        return JSONResponse(status_code=502, content={"error": f"License service unreachable: {exc}", "status": "upgrade_failed"})
+
+    try:
+        response_body = response.json()
+    except ValueError:
+        response_body = {"error": response.text}
+
+    if response.status_code >= 400:
+        response_body.setdefault("status", "upgrade_failed")
+        return JSONResponse(status_code=response.status_code, content=response_body)
+
+    response_body["status"] = response_body.get("status") or "upgrade_requested"
+    response_body["message"] = "Upgrade request submitted to Horizon Relevance."
+    return response_body
 
 @app.post("/login")
 async def login(request: Request):

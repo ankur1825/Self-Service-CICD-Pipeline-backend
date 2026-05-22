@@ -131,6 +131,8 @@ spec:
               value: {{ .Values.enterprise.licenseMode | quote }}
             - name: ENTERPRISE_LICENSE_SYNC_ENDPOINT
               value: {{ .Values.enterprise.licenseSyncEndpoint | quote }}
+            - name: ENTERPRISE_LICENSE_UPGRADE_ENDPOINT
+              value: {{ .Values.enterprise.licenseUpgradeEndpoint | quote }}
             - name: ENTERPRISE_LICENSE_USAGE_REPORTING_ENABLED
               value: {{ .Values.enterprise.licenseUsageReportingEnabled | quote }}
             - name: ENTERPRISE_LICENSE_USAGE_ENDPOINT
