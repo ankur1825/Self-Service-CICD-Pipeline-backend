@@ -144,3 +144,29 @@ enterprise:
 ```
 
 Keep `signingSecret` empty for production asymmetric verification. It remains available only for local development or legacy HMAC licenses.
+
+## Production Operations: Scheduled Sync And Grace
+
+Client-hosted enterprise deployments should enable scheduled online sync so license upgrades, renewals, suspensions, and revocations are detected without requiring a human to click **Sync License**.
+
+Recommended values:
+
+```yaml
+enterprise:
+  licenseMode: online-sync
+  licenseEnforcementEnabled: true
+  licenseUsageReportingEnabled: true
+  licenseAutoSyncEnabled: true
+  licenseAutoSyncIntervalSeconds: "21600"
+  licenseCacheGraceHours: "72"
+```
+
+Behavior:
+
+- `licenseAutoSyncEnabled` starts a lightweight backend thread that syncs with Horizon on a fixed interval.
+- `licenseAutoSyncIntervalSeconds` defaults to 6 hours and has a 5 minute minimum.
+- `licenseCacheGraceHours` lets an already synced online license continue temporarily if the license service is unreachable or renewal is delayed.
+- A revoked, suspended, inactive, or disabled entitlement is denied.
+- An expired entitlement outside the grace period is denied.
+
+The grace window is not a commercial renewal. It is an outage cushion so a temporary network or license-service issue does not immediately break a client-hosted production pipeline.

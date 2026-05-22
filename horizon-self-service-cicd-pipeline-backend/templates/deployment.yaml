@@ -137,6 +137,12 @@ spec:
               value: {{ .Values.enterprise.licenseUsageReportingEnabled | quote }}
             - name: ENTERPRISE_LICENSE_USAGE_ENDPOINT
               value: {{ .Values.enterprise.licenseUsageEndpoint | quote }}
+            - name: ENTERPRISE_LICENSE_AUTO_SYNC_ENABLED
+              value: {{ .Values.enterprise.licenseAutoSyncEnabled | quote }}
+            - name: ENTERPRISE_LICENSE_AUTO_SYNC_INTERVAL_SECONDS
+              value: {{ .Values.enterprise.licenseAutoSyncIntervalSeconds | quote }}
+            - name: ENTERPRISE_LICENSE_CACHE_GRACE_HOURS
+              value: {{ .Values.enterprise.licenseCacheGraceHours | quote }}
             - name: ENTERPRISE_LICENSE_CACHE_FILE
               value: {{ .Values.enterprise.licenseCacheFile | quote }}
             - name: ENTERPRISE_LICENSE_SIGNATURE_VERIFICATION_REQUIRED

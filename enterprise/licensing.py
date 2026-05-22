@@ -4,7 +4,7 @@ import hashlib
 import hmac
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
@@ -183,6 +183,17 @@ def _parse_datetime(value: str) -> datetime:
     return parsed
 
 
+def _format_datetime(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _env_int(name: str, default: int = 0) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
 def _load_license_file() -> Dict[str, Any]:
     license_file = os.getenv("ENTERPRISE_LICENSE_FILE", "").strip()
     if not license_file:
@@ -296,13 +307,32 @@ def validate_license(
     if not license_doc.get("license_key"):
         raise LicenseValidationError("license_key is required when license enforcement is enabled.")
 
+    entitlement_status = str(
+        license_doc.get("entitlement_status")
+        or license_doc.get("license_status")
+        or "active"
+    ).strip().lower()
+    if entitlement_status in {"revoked", "suspended", "inactive", "disabled"}:
+        raise LicenseValidationError(f"License entitlement is {entitlement_status}.")
+
     _verify_license_signature(license_doc)
 
     expires_at = license_doc.get("expires_at")
     if not expires_at:
         raise LicenseValidationError("License expiration is required.")
-    if _parse_datetime(expires_at) <= datetime.now(timezone.utc):
-        raise LicenseValidationError("License is expired.")
+    now = datetime.now(timezone.utc)
+    expires_at_dt = _parse_datetime(expires_at)
+    license_state = "active"
+    if expires_at_dt <= now:
+        grace_hours = _env_int("ENTERPRISE_LICENSE_CACHE_GRACE_HOURS", 72)
+        license_mode = str(license_doc.get("license_mode") or os.getenv("ENTERPRISE_LICENSE_MODE", "")).strip().lower()
+        grace_expires_at = expires_at_dt + timedelta(hours=grace_hours)
+        if license_mode == "online-sync" and grace_hours > 0 and now <= grace_expires_at:
+            license_state = "grace_period"
+            license_doc["warning"] = "License is expired, but cached online entitlement is within the configured grace period."
+            license_doc["grace_expires_at"] = _format_datetime(grace_expires_at)
+        else:
+            raise LicenseValidationError("License is expired.")
 
     enabled_pipelines = license_doc.get("enabled_pipelines") or []
     if enabled_pipelines and not _contains(enabled_pipelines, pipeline_name):
@@ -327,7 +357,7 @@ def validate_license(
             raise LicenseValidationError(f"Feature '{feature}' is not enabled for this license.")
 
     license_doc["validation_mode"] = "enforced"
-    license_doc["status"] = "active"
+    license_doc["status"] = license_state
     return license_doc
 
 
@@ -349,6 +379,9 @@ def license_summary(license_doc: Dict[str, Any]) -> Dict[str, Any]:
         "max_builds_per_month": license_doc.get("max_builds_per_month"),
         "max_users": license_doc.get("max_users"),
         "status": license_doc.get("status", "unknown"),
+        "warning": license_doc.get("warning"),
+        "grace_expires_at": license_doc.get("grace_expires_at"),
+        "entitlement_status": license_doc.get("entitlement_status"),
         "validation_mode": license_doc.get("validation_mode", "unknown"),
         "license_mode": license_doc.get("license_mode") or os.getenv("ENTERPRISE_LICENSE_MODE", "offline-file"),
         "signature_algorithm": license_doc.get("signature_algorithm"),

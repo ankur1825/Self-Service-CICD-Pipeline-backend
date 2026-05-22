@@ -17,6 +17,8 @@ import json
 import hmac
 import hashlib
 import re
+import threading
+import time
 from html import escape
 
 from database import SessionLocal, engine, Base
@@ -1195,11 +1197,29 @@ def _license_upgrade_endpoint() -> str:
 def _license_usage_reporting_enabled() -> bool:
     return os.getenv("ENTERPRISE_LICENSE_USAGE_REPORTING_ENABLED", "false").strip().lower() == "true"
 
+def _license_auto_sync_enabled() -> bool:
+    return os.getenv("ENTERPRISE_LICENSE_AUTO_SYNC_ENABLED", "false").strip().lower() == "true"
+
+def _license_auto_sync_interval_seconds() -> int:
+    try:
+        return max(300, int(os.getenv("ENTERPRISE_LICENSE_AUTO_SYNC_INTERVAL_SECONDS", "21600")))
+    except ValueError:
+        return 21600
+
+def _license_cache_grace_hours() -> int:
+    try:
+        return max(0, int(os.getenv("ENTERPRISE_LICENSE_CACHE_GRACE_HOURS", "72")))
+    except ValueError:
+        return 72
+
 def _license_usage_status() -> Dict[str, Any]:
     endpoint = _license_usage_endpoint()
     return {
         "usage_reporting_enabled": _license_usage_reporting_enabled(),
         "usage_endpoint_configured": bool(endpoint),
+        "auto_sync_enabled": _license_auto_sync_enabled(),
+        "auto_sync_interval_seconds": _license_auto_sync_interval_seconds(),
+        "cache_grace_hours": _license_cache_grace_hours(),
     }
 
 def report_license_usage(validated_license: Dict[str, Any], event_type: str, *, quantity: int = 1, metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -1305,32 +1325,28 @@ def validate_enterprise_license(request: LicenseValidationRequest):
     except LicenseValidationError as exc:
         return JSONResponse(status_code=403, content={"error": str(exc), "status": "invalid"})
 
-@app.post("/license/sync")
-def sync_enterprise_license(request: LicenseSyncRequest):
+def _perform_enterprise_license_sync(force: bool = False) -> tuple[int, Dict[str, Any]]:
     license_mode = os.getenv("ENTERPRISE_LICENSE_MODE", "offline-file").strip().lower()
     sync_endpoint = os.getenv("ENTERPRISE_LICENSE_SYNC_ENDPOINT", "").strip()
     activation_token = os.getenv("ENTERPRISE_LICENSE_ACTIVATION_TOKEN", "").strip()
     current_license = default_license_from_env()
 
     if license_mode != "online-sync":
-        return JSONResponse(
-            status_code=400,
-            content={
+        return 400, {
                 "error": "Online license sync is not enabled for this deployment.",
                 "status": "sync_disabled",
                 "license_mode": license_mode,
-            },
-        )
+            }
     if not sync_endpoint:
-        return JSONResponse(status_code=400, content={"error": "ENTERPRISE_LICENSE_SYNC_ENDPOINT is required.", "status": "sync_failed"})
+        return 400, {"error": "ENTERPRISE_LICENSE_SYNC_ENDPOINT is required.", "status": "sync_failed"}
     if not activation_token:
-        return JSONResponse(status_code=400, content={"error": "ENTERPRISE_LICENSE_ACTIVATION_TOKEN is required.", "status": "sync_failed"})
+        return 400, {"error": "ENTERPRISE_LICENSE_ACTIVATION_TOKEN is required.", "status": "sync_failed"}
 
     identity = _license_sync_identity(current_license)
     if not identity["client_id"]:
-        return JSONResponse(status_code=400, content={"error": "ENTERPRISE_CLIENT_ID is required for online license sync.", "status": "sync_failed"})
+        return 400, {"error": "ENTERPRISE_CLIENT_ID is required for online license sync.", "status": "sync_failed"}
     if not identity["installation_id"]:
-        return JSONResponse(status_code=400, content={"error": "ENTERPRISE_INSTALLATION_ID is required for online license sync.", "status": "sync_failed"})
+        return 400, {"error": "ENTERPRISE_INSTALLATION_ID is required for online license sync.", "status": "sync_failed"}
 
     payload = {
         "client_id": identity["client_id"],
@@ -1342,7 +1358,7 @@ def sync_enterprise_license(request: LicenseSyncRequest):
         "product_version": identity["product_version"],
         "current_license_key": current_license.get("license_key", ""),
         "current_expires_at": current_license.get("expires_at", ""),
-        "force": bool(request.force),
+        "force": bool(force),
         "platform": {
             "product": "Horizon Relevance AI DevSecOps Platform",
             "backend_root_path": "/pipeline/api",
@@ -1358,7 +1374,7 @@ def sync_enterprise_license(request: LicenseSyncRequest):
         response = requests.post(sync_endpoint, json=payload, timeout=15)
     except requests.RequestException as exc:
         logger.exception("License sync failed while calling Horizon license service")
-        return JSONResponse(status_code=502, content={"error": f"License service unreachable: {exc}", "status": "sync_failed"})
+        return 502, {"error": f"License service unreachable: {exc}", "status": "sync_failed"}
 
     if response.status_code >= 400:
         try:
@@ -1366,12 +1382,12 @@ def sync_enterprise_license(request: LicenseSyncRequest):
         except ValueError:
             error_body = {"error": response.text}
         error_body.setdefault("status", "sync_failed")
-        return JSONResponse(status_code=response.status_code, content=error_body)
+        return response.status_code, error_body
 
     try:
         response_body = response.json()
     except ValueError:
-        return JSONResponse(status_code=502, content={"error": "License service returned non-JSON response.", "status": "sync_failed"})
+        return 502, {"error": "License service returned non-JSON response.", "status": "sync_failed"}
 
     synced_license = response_body.get("license") or response_body
     synced_license["license_mode"] = "online-sync"
@@ -1384,15 +1400,43 @@ def sync_enterprise_license(request: LicenseSyncRequest):
             requested_features=[],
         )
     except LicenseValidationError as exc:
-        return JSONResponse(status_code=403, content={"error": str(exc), "status": "sync_invalid"})
+        return 403, {"error": str(exc), "status": "sync_invalid"}
 
     cached = save_cached_license(validated)
     summary = license_summary(cached)
-    summary["status"] = "active"
+    summary["status"] = validated.get("status", "active")
     summary["sync_available"] = True
     summary["upgrade_available"] = bool(_license_upgrade_endpoint() and summary.get("client_id"))
     summary["message"] = response_body.get("message", "License synced successfully.")
-    return summary
+    summary.update(_license_usage_status())
+    return 200, summary
+
+@app.post("/license/sync")
+def sync_enterprise_license(request: LicenseSyncRequest):
+    status_code, body = _perform_enterprise_license_sync(force=bool(request.force))
+    if status_code >= 400:
+        return JSONResponse(status_code=status_code, content=body)
+    return body
+
+def _license_auto_sync_loop() -> None:
+    interval = _license_auto_sync_interval_seconds()
+    logger.info("Enterprise license auto-sync enabled with %s second interval", interval)
+    time.sleep(20)
+    while True:
+        try:
+            status_code, body = _perform_enterprise_license_sync(force=False)
+            if status_code >= 400:
+                logger.warning("Enterprise license auto-sync failed: %s", body)
+            else:
+                logger.info("Enterprise license auto-sync completed: %s", body.get("status", "ok"))
+        except Exception as exc:
+            logger.exception("Enterprise license auto-sync crashed: %s", exc)
+        time.sleep(interval)
+
+@app.on_event("startup")
+def start_license_auto_sync() -> None:
+    if _license_auto_sync_enabled():
+        threading.Thread(target=_license_auto_sync_loop, name="license-auto-sync", daemon=True).start()
 
 @app.post("/license/upgrade-request")
 def request_license_upgrade(request: LicenseUpgradeRequest):

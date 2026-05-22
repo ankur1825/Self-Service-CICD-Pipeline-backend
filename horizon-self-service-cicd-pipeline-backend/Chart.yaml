@@ -3,4 +3,4 @@ name: horizon-self-service-cicd-pipeline-backend
 description: FastAPI backend service
 type: application
 version: 0.1.0
-appVersion: "1.4.31"
+appVersion: "1.4.32"
