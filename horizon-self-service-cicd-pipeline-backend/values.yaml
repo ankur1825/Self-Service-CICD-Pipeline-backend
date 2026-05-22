@@ -4,7 +4,7 @@ replicaCount: 1
 
 image:
   repository: 426946630837.dkr.ecr.us-east-1.amazonaws.com/horizon/backend
-  tag: "1.4.28"
+  tag: "1.4.29"
   pullPolicy: Always
 
 service:
@@ -91,7 +91,7 @@ enterprise:
   installationId: ""
   awsAccountId: ""
   awsRegion: us-east-1
-  productVersion: "1.4.28"
+  productVersion: "1.4.29"
   maxRepos: "999999"
   maxBuildsPerMonth: "999999"
   maxUsers: "999999"
@@ -102,12 +102,21 @@ enterprise:
   licenseUsageReportingEnabled: false
   licenseUsageEndpoint: ""
   licenseCacheFile: /app/data/enterprise-license-cache.json
+  licenseSignatureVerificationRequired: true
+  licensePublicKeyFile: ""
+  licensePublicKeySetFile: ""
   activationTokenSecret:
     existingSecret: ""
     key: ENTERPRISE_LICENSE_ACTIVATION_TOKEN
   signingSecret:
     existingSecret: ""
     key: ENTERPRISE_LICENSE_SIGNING_SECRET
+  publicKeySecret:
+    existingSecret: ""
+    key: ENTERPRISE_LICENSE_PUBLIC_KEY_PEM
+  publicKeySetSecret:
+    existingSecret: ""
+    key: ENTERPRISE_LICENSE_PUBLIC_KEY_SET_JSON
 
 environmentCatalog:
   enabled: true

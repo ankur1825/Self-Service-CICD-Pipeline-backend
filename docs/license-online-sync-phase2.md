@@ -22,17 +22,18 @@ enterprise:
   installationId: acme-fintech-prod-us-east-1
   awsAccountId: "123456789012"
   awsRegion: us-east-1
-  productVersion: "1.4.28"
+  productVersion: "1.4.29"
   licenseMode: online-sync
   licenseSyncEndpoint: https://license.horizonrelevance.com/api/v1/licenses/sync
   licenseUpgradeEndpoint: https://license.horizonrelevance.com/api/v1/licenses/upgrade-requests
   licenseCacheFile: /app/data/enterprise-license-cache.json
+  licenseSignatureVerificationRequired: true
   activationTokenSecret:
     existingSecret: horizon-license-activation
     key: ENTERPRISE_LICENSE_ACTIVATION_TOKEN
-  signingSecret:
-    existingSecret: horizon-license-verifier
-    key: ENTERPRISE_LICENSE_SIGNING_SECRET
+  publicKeySecret:
+    existingSecret: horizon-license-public-key
+    key: ENTERPRISE_LICENSE_PUBLIC_KEY_PEM
 ```
 
 ## Kubernetes Secrets
@@ -42,12 +43,37 @@ kubectl create secret generic horizon-license-activation \
   -n <platform-namespace> \
   --from-literal=ENTERPRISE_LICENSE_ACTIVATION_TOKEN='<activation-token>'
 
-kubectl create secret generic horizon-license-verifier \
+kubectl create secret generic horizon-license-public-key \
   -n <platform-namespace> \
-  --from-literal=ENTERPRISE_LICENSE_SIGNING_SECRET='<shared-dev-signing-secret>'
+  --from-file=ENTERPRISE_LICENSE_PUBLIC_KEY_PEM=./horizon-license-public-key.pem
 ```
 
-For production, replace the shared HMAC verifier with public-key verification when the License Management Service is moved to KMS asymmetric signing.
+For production, use public-key verification. The Horizon License Management Service signs entitlements with an AWS KMS asymmetric signing key and the client-hosted backend verifies with the exported public key only. The client does not receive Horizon's private signing material.
+
+For key rotation, provide a key-set secret instead of a single PEM:
+
+```bash
+kubectl create secret generic horizon-license-public-key-set \
+  -n <platform-namespace> \
+  --from-file=ENTERPRISE_LICENSE_PUBLIC_KEY_SET_JSON=./horizon-license-public-keys.json
+```
+
+Example key-set JSON:
+
+```json
+{
+  "keys": [
+    {
+      "key_id": "arn:aws:kms:us-east-1:111122223333:key/current",
+      "public_key_pem": "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n"
+    },
+    {
+      "key_id": "arn:aws:kms:us-east-1:111122223333:key/previous",
+      "public_key_pem": "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n"
+    }
+  ]
+}
+```
 
 ## API Contract
 
@@ -61,7 +87,7 @@ The backend sends this payload to the Horizon License Management Service:
   "activation_token": "stored-in-kubernetes-secret",
   "aws_account_id": "123456789012",
   "region": "us-east-1",
-  "product_version": "1.4.28",
+  "product_version": "1.4.29",
   "current_license_key": "optional-current-license",
   "current_expires_at": "optional-current-expiry",
   "force": true,
@@ -90,3 +116,31 @@ Phase 6 lets the client admin request a commercial upgrade from the client-hoste
 7. Client admin clicks **Sync License** to receive the upgraded signed entitlement.
 
 The backend derives `ENTERPRISE_LICENSE_UPGRADE_ENDPOINT` automatically from `ENTERPRISE_LICENSE_SYNC_ENDPOINT` when the sync endpoint ends in `/api/v1/licenses/sync`. Set `licenseUpgradeEndpoint` explicitly when the license service is exposed through a different route.
+
+## Phase 7 Asymmetric Signature Verification
+
+Phase 7 removes the production need for shared HMAC signing secrets in client-hosted deployments.
+
+1. Horizon License Management Service runs with `HORIZON_LICENSE_SIGNING_MODE=aws-kms`.
+2. Horizon signs each license entitlement with an AWS KMS asymmetric signing key.
+3. The license payload includes `signature_mode`, `signature_algorithm`, `signature_key_id`, `signature_format`, and `signature_input`.
+4. Horizon gives the client only the public key, either as a single PEM or as a key-set JSON for rotation.
+5. The client-hosted backend verifies the license signature locally before enforcing pipelines, environments, AWS account bindings, installation binding, and feature entitlements.
+6. During key rotation, Horizon signs new licenses with the new KMS key while the client backend can trust both the current and previous public keys through `ENTERPRISE_LICENSE_PUBLIC_KEY_SET_JSON`.
+
+Recommended production values:
+
+```yaml
+enterprise:
+  licenseEnforcementEnabled: true
+  licenseMode: online-sync
+  licenseSignatureVerificationRequired: true
+  activationTokenSecret:
+    existingSecret: horizon-license-activation
+    key: ENTERPRISE_LICENSE_ACTIVATION_TOKEN
+  publicKeySetSecret:
+    existingSecret: horizon-license-public-key-set
+    key: ENTERPRISE_LICENSE_PUBLIC_KEY_SET_JSON
+```
+
+Keep `signingSecret` empty for production asymmetric verification. It remains available only for local development or legacy HMAC licenses.

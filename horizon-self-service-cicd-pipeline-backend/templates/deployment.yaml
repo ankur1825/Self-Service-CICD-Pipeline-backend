@@ -139,6 +139,12 @@ spec:
               value: {{ .Values.enterprise.licenseUsageEndpoint | quote }}
             - name: ENTERPRISE_LICENSE_CACHE_FILE
               value: {{ .Values.enterprise.licenseCacheFile | quote }}
+            - name: ENTERPRISE_LICENSE_SIGNATURE_VERIFICATION_REQUIRED
+              value: {{ .Values.enterprise.licenseSignatureVerificationRequired | quote }}
+            - name: ENTERPRISE_LICENSE_PUBLIC_KEY_FILE
+              value: {{ .Values.enterprise.licensePublicKeyFile | quote }}
+            - name: ENTERPRISE_LICENSE_PUBLIC_KEY_SET_FILE
+              value: {{ .Values.enterprise.licensePublicKeySetFile | quote }}
             {{- if .Values.enterprise.activationTokenSecret.existingSecret }}
             - name: ENTERPRISE_LICENSE_ACTIVATION_TOKEN
               valueFrom:
@@ -152,6 +158,24 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.enterprise.signingSecret.existingSecret | quote }}
                   key: {{ .Values.enterprise.signingSecret.key | quote }}
+            {{- end }}
+            {{- with .Values.enterprise.publicKeySecret }}
+            {{- if .existingSecret }}
+            - name: ENTERPRISE_LICENSE_PUBLIC_KEY_PEM
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .existingSecret | quote }}
+                  key: {{ .key | quote }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.enterprise.publicKeySetSecret }}
+            {{- if .existingSecret }}
+            - name: ENTERPRISE_LICENSE_PUBLIC_KEY_SET_JSON
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .existingSecret | quote }}
+                  key: {{ .key | quote }}
+            {{- end }}
             {{- end }}
           volumeMounts:
             - name: app-data

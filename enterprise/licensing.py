@@ -1,4 +1,5 @@
 import base64
+import binascii
 import hashlib
 import hmac
 import json
@@ -34,6 +35,137 @@ def _split_csv(value: Optional[str]) -> list[str]:
     if not value:
         return []
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _b64url_decode(value: str) -> bytes:
+    normalized = value.encode("utf-8")
+    normalized += b"=" * (-len(normalized) % 4)
+    try:
+        return base64.urlsafe_b64decode(normalized)
+    except (binascii.Error, ValueError) as exc:
+        raise LicenseValidationError("License signature is not valid base64url.") from exc
+
+
+def _load_public_key_entries() -> list[Dict[str, str]]:
+    entries: list[Dict[str, str]] = []
+
+    inline_pem = os.getenv("ENTERPRISE_LICENSE_PUBLIC_KEY_PEM", "").strip()
+    if inline_pem:
+        entries.append({"key_id": os.getenv("ENTERPRISE_LICENSE_PUBLIC_KEY_ID", "").strip(), "pem": inline_pem})
+
+    public_key_file = os.getenv("ENTERPRISE_LICENSE_PUBLIC_KEY_FILE", "").strip()
+    if public_key_file:
+        path = Path(public_key_file)
+        if not path.exists():
+            raise LicenseValidationError(f"Configured license public key file does not exist: {public_key_file}")
+        entries.append({"key_id": os.getenv("ENTERPRISE_LICENSE_PUBLIC_KEY_ID", "").strip(), "pem": path.read_text().strip()})
+
+    key_set_json = os.getenv("ENTERPRISE_LICENSE_PUBLIC_KEY_SET_JSON", "").strip()
+    key_set_file = os.getenv("ENTERPRISE_LICENSE_PUBLIC_KEY_SET_FILE", "").strip()
+    if key_set_file:
+        path = Path(key_set_file)
+        if not path.exists():
+            raise LicenseValidationError(f"Configured license public key set file does not exist: {key_set_file}")
+        key_set_json = path.read_text().strip()
+
+    if key_set_json:
+        try:
+            key_set = json.loads(key_set_json)
+        except json.JSONDecodeError as exc:
+            raise LicenseValidationError("Configured license public key set JSON is invalid.") from exc
+
+        if isinstance(key_set, dict) and isinstance(key_set.get("keys"), list):
+            for item in key_set["keys"]:
+                if isinstance(item, dict) and item.get("public_key_pem"):
+                    entries.append({
+                        "key_id": str(item.get("key_id") or item.get("kid") or ""),
+                        "pem": str(item["public_key_pem"]).strip(),
+                    })
+        elif isinstance(key_set, dict):
+            for key_id, pem in key_set.items():
+                if isinstance(pem, str):
+                    entries.append({"key_id": str(key_id), "pem": pem.strip()})
+
+    return [entry for entry in entries if entry.get("pem")]
+
+
+def _select_public_key(license_doc: Dict[str, Any]) -> str:
+    entries = _load_public_key_entries()
+    if not entries:
+        raise LicenseValidationError("RSA license verification requires ENTERPRISE_LICENSE_PUBLIC_KEY_PEM or ENTERPRISE_LICENSE_PUBLIC_KEY_SET_JSON.")
+
+    expected_key_id = str(license_doc.get("signature_key_id") or "").strip()
+    if expected_key_id:
+        for entry in entries:
+            if entry.get("key_id") == expected_key_id:
+                return entry["pem"]
+        raise LicenseValidationError(f"No configured license public key matches signature_key_id '{expected_key_id}'.")
+
+    return entries[0]["pem"]
+
+
+def _verify_rsa_signature(license_doc: Dict[str, Any], signature: str, algorithm: str) -> None:
+    try:
+        from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import padding, utils
+    except ImportError as exc:
+        raise LicenseValidationError("cryptography package is required for RSA license verification.") from exc
+
+    public_key_pem = _select_public_key(license_doc)
+    public_key = serialization.load_pem_public_key(public_key_pem.encode("utf-8"))
+    digest = hashlib.sha256(_canonical_payload(license_doc)).digest()
+    signature_bytes = _b64url_decode(signature)
+
+    normalized_algorithm = algorithm.upper()
+    if normalized_algorithm in {"RSASSA_PKCS1_V1_5_SHA_256", "RS256"}:
+        signature_padding = padding.PKCS1v15()
+    elif normalized_algorithm in {"RSASSA_PSS_SHA_256", "PS256"}:
+        signature_padding = padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=hashes.SHA256().digest_size)
+    else:
+        raise LicenseValidationError(f"Unsupported RSA license signature algorithm '{algorithm}'.")
+
+    try:
+        public_key.verify(signature_bytes, digest, signature_padding, utils.Prehashed(hashes.SHA256()))
+    except InvalidSignature as exc:
+        raise LicenseValidationError("License signature is invalid.") from exc
+
+
+def _verify_license_signature(license_doc: Dict[str, Any]) -> None:
+    signature = license_doc.get("signature") or license_doc.get("license_signature")
+    verification_required = _env_bool("ENTERPRISE_LICENSE_SIGNATURE_VERIFICATION_REQUIRED", True)
+    if not signature:
+        if verification_required:
+            raise LicenseValidationError("Signed license is required.")
+        return
+
+    algorithm = str(license_doc.get("signature_algorithm") or "").strip().upper()
+    signing_mode = str(license_doc.get("signature_mode") or "").strip().lower()
+    secret = os.getenv("ENTERPRISE_LICENSE_SIGNING_SECRET", "").strip()
+
+    if algorithm in {"HMAC_SHA256", ""} and (secret or signing_mode in {"", "local-hmac"}):
+        if not secret:
+            if verification_required:
+                raise LicenseValidationError("HMAC license verification requires ENTERPRISE_LICENSE_SIGNING_SECRET.")
+            return
+        expected = _expected_signature(license_doc, secret)
+        if not hmac.compare_digest(signature, expected):
+            raise LicenseValidationError("License signature is invalid.")
+        return
+
+    if algorithm in {"RSASSA_PKCS1_V1_5_SHA_256", "RSASSA_PSS_SHA_256", "RS256", "PS256"} or signing_mode == "aws-kms":
+        _verify_rsa_signature(license_doc, signature, algorithm or "RSASSA_PKCS1_V1_5_SHA_256")
+        return
+
+    if verification_required:
+        raise LicenseValidationError(f"Unsupported license signature algorithm '{algorithm or signing_mode}'.")
 
 
 def _parse_datetime(value: str) -> datetime:
@@ -115,6 +247,12 @@ def merge_request_license(request_values: Dict[str, Any]) -> Dict[str, Any]:
         "license_type",
         "license_signature",
         "license_expires_at",
+        "signature_algorithm",
+        "signature_key_id",
+        "signature_mode",
+        "signature_version",
+        "signature_format",
+        "signature_input",
         "enabled_pipelines",
         "enabled_features",
         "allowed_environments",
@@ -151,14 +289,7 @@ def validate_license(
     if not license_doc.get("license_key"):
         raise LicenseValidationError("license_key is required when license enforcement is enabled.")
 
-    secret = os.getenv("ENTERPRISE_LICENSE_SIGNING_SECRET", "").strip()
-    signature = license_doc.get("signature") or license_doc.get("license_signature")
-    if secret:
-        if not signature:
-            raise LicenseValidationError("Signed license is required.")
-        expected = _expected_signature(license_doc, secret)
-        if not hmac.compare_digest(signature, expected):
-            raise LicenseValidationError("License signature is invalid.")
+    _verify_license_signature(license_doc)
 
     expires_at = license_doc.get("expires_at")
     if not expires_at:
@@ -213,6 +344,9 @@ def license_summary(license_doc: Dict[str, Any]) -> Dict[str, Any]:
         "status": license_doc.get("status", "unknown"),
         "validation_mode": license_doc.get("validation_mode", "unknown"),
         "license_mode": license_doc.get("license_mode") or os.getenv("ENTERPRISE_LICENSE_MODE", "offline-file"),
+        "signature_algorithm": license_doc.get("signature_algorithm"),
+        "signature_key_id": license_doc.get("signature_key_id"),
+        "signature_mode": license_doc.get("signature_mode"),
         "last_synced_at": license_doc.get("last_synced_at"),
         "limits": license_doc.get("limits", {}),
     }
