@@ -51,6 +51,17 @@ spec:
               value: {{ .Values.environmentPreflight.iamMode | default "validation-only" | quote }}
             - name: ENVIRONMENT_EKS_ACCESS_MODE
               value: {{ .Values.environmentPreflight.eksAccessMode | default "namespace-scoped" | quote }}
+            - name: BACKEND_RBAC_ENFORCEMENT_ENABLED
+              value: {{ .Values.auth.rbacEnforcementEnabled | quote }}
+            - name: BACKEND_SESSION_TTL_SECONDS
+              value: {{ .Values.auth.sessionTtlSeconds | quote }}
+            {{- if .Values.auth.sessionSecret.existingSecret }}
+            - name: BACKEND_SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.sessionSecret.existingSecret | quote }}
+                  key: {{ .Values.auth.sessionSecret.key | quote }}
+            {{- end }}
             # - name: REQUESTS_CA_BUNDLE
             #   value: "/certs/jenkins-ca.pem"   # Path inside container
             - name: LDAP_MANAGER_PASSWORD
