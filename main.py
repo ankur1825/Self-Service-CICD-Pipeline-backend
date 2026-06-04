@@ -158,6 +158,8 @@ LDAP_GROUP_MEMBER_ATTRIBUTE = os.getenv("LDAP_GROUP_MEMBER_ATTRIBUTE", "member")
 LDAP_GROUP_NAME_ATTRIBUTE = os.getenv("LDAP_GROUP_NAME_ATTRIBUTE", "cn")
 LDAP_USER_GROUP_ATTRIBUTE = os.getenv("LDAP_USER_GROUP_ATTRIBUTE", "memberOf")
 LDAP_ROLE_GROUP_MAPPINGS_RAW = os.getenv("LDAP_ROLE_GROUP_MAPPINGS", "{}")
+RBAC_BOOTSTRAP_PLATFORM_ADMINS_RAW = os.getenv("RBAC_BOOTSTRAP_PLATFORM_ADMINS", "")
+RBAC_BOOTSTRAP_ROLE_GRANTS_RAW = os.getenv("RBAC_BOOTSTRAP_ROLE_GRANTS", "{}")
 ENVIRONMENT_CATALOG_FILE = os.getenv("ENVIRONMENT_CATALOG_FILE", "/app/config/environment-catalog.json")
 
 # CORS setup for frontend
@@ -491,6 +493,54 @@ ROLE_ENV_PERMISSIONS = {
     ROLE_VIEWER: set(),
 }
 
+def normalize_role_name(role: str) -> str:
+    return str(role or "").strip().lower()
+
+def normalize_identity(value: str) -> str:
+    return str(value or "").strip().lower()
+
+def parse_identity_list(raw: Any) -> set[str]:
+    if not raw:
+        return set()
+    if isinstance(raw, str):
+        values = re.split(r"[,\n;]+", raw)
+    elif isinstance(raw, list):
+        values = raw
+    else:
+        return set()
+    return {normalize_identity(value) for value in values if normalize_identity(value)}
+
+def parse_bootstrap_role_grants(raw: str) -> Dict[str, set[str]]:
+    grants: Dict[str, set[str]] = {}
+    if not raw:
+        return grants
+    try:
+        payload = json.loads(raw)
+    except Exception as exc:
+        logger.warning("Invalid RBAC_BOOTSTRAP_ROLE_GRANTS JSON: %s", exc)
+        return grants
+
+    if isinstance(payload, dict):
+        iterable = payload.items()
+    elif isinstance(payload, list):
+        iterable = ((item.get("role"), item.get("users")) for item in payload if isinstance(item, dict))
+    else:
+        return grants
+
+    for role, users in iterable:
+        role_name = normalize_role_name(role)
+        if role_name not in ROLE_ENV_PERMISSIONS:
+            continue
+        identities = parse_identity_list(users)
+        if identities:
+            grants.setdefault(role_name, set()).update(identities)
+    return grants
+
+BOOTSTRAP_ROLE_GRANTS = parse_bootstrap_role_grants(RBAC_BOOTSTRAP_ROLE_GRANTS_RAW)
+BOOTSTRAP_PLATFORM_ADMINS = parse_identity_list(RBAC_BOOTSTRAP_PLATFORM_ADMINS_RAW)
+if BOOTSTRAP_PLATFORM_ADMINS:
+    BOOTSTRAP_ROLE_GRANTS.setdefault(ROLE_PLATFORM_ADMIN, set()).update(BOOTSTRAP_PLATFORM_ADMINS)
+
 PUBLIC_CATALOG_FIELDS = {
     "name",
     "display_name",
@@ -502,12 +552,19 @@ PUBLIC_CATALOG_FIELDS = {
     "updated_at",
 }
 
-def normalize_role_name(role: str) -> str:
-    return str(role or "").strip().lower()
-
 def normalize_roles(roles: Optional[List[str]]) -> List[str]:
     normalized = sorted({normalize_role_name(role) for role in (roles or []) if normalize_role_name(role)})
     return normalized or [ROLE_VIEWER]
+
+def apply_bootstrap_role_grants(username: str, email: str, roles: Optional[List[str]]) -> List[str]:
+    if not BOOTSTRAP_ROLE_GRANTS:
+        return normalize_roles(roles)
+    identities = {normalize_identity(username), normalize_identity(email)}
+    granted_roles = set(normalize_roles(roles))
+    for role, allowed_identities in BOOTSTRAP_ROLE_GRANTS.items():
+        if identities.intersection(allowed_identities):
+            granted_roles.add(role)
+    return normalize_roles(list(granted_roles))
 
 def principal_has_role(principal: AuthPrincipal, allowed_roles: set[str]) -> bool:
     return bool(set(normalize_roles(principal.roles)).intersection(allowed_roles))
@@ -1765,7 +1822,7 @@ async def login(request: Request):
         auth_conn = Connection(server, user=user_dn, password=password, auto_bind=True)
         auth_conn.unbind()
 
-        roles = normalize_roles(resolve_roles_from_ldap_groups(groups))
+        roles = apply_bootstrap_role_grants(username, email, resolve_roles_from_ldap_groups(groups))
         principal = AuthPrincipal(
             username=username,
             email=email,
