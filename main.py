@@ -925,6 +925,18 @@ def ldap_entry_values(entry, attribute: str) -> List[str]:
     return [str(value)]
 
 
+def render_ldap_group_search_filter(user_dn: str) -> str:
+    escaped_user_dn = escape_filter_chars(user_dn)
+    configured_filter = (LDAP_GROUP_SEARCH_FILTER or "(objectClass=groupOfNames)").strip()
+    if "{user_dn}" in configured_filter or "{user_dn_escaped}" in configured_filter:
+        return (
+            configured_filter
+            .replace("{user_dn_escaped}", escaped_user_dn)
+            .replace("{user_dn}", escaped_user_dn)
+        )
+    return f"(&{configured_filter}({LDAP_GROUP_MEMBER_ATTRIBUTE}={escaped_user_dn}))"
+
+
 def resolve_ldap_groups(search_conn: Connection, user_entry, user_dn: str) -> List[str]:
     groups = set()
 
@@ -937,7 +949,7 @@ def resolve_ldap_groups(search_conn: Connection, user_entry, user_dn: str) -> Li
     try:
         search_conn.search(
             search_base=LDAP_GROUP_BASE_DN,
-            search_filter=f"(&{LDAP_GROUP_SEARCH_FILTER}({LDAP_GROUP_MEMBER_ATTRIBUTE}={escape_filter_chars(user_dn)}))",
+            search_filter=render_ldap_group_search_filter(user_dn),
             search_scope=SUBTREE,
             attributes=[LDAP_GROUP_NAME_ATTRIBUTE],
         )
