@@ -179,7 +179,6 @@ def build_runner_job_config(
 pipeline {{
   agent any
   options {{
-    timestamps()
     disableConcurrentBuilds()
   }}
   stages {{
@@ -205,11 +204,13 @@ pipeline {{
           writeFile file: 'horizon-runner-request.json', text: JsonOutput.prettyPrint(JsonOutput.toJson(request))
         }}
         sh '''
-          set -euo pipefail
+          set -eu
           RUNNER_URL="${{HORIZON_RUNNER_URL:-%s}}"
           curl -fsS -X POST "$RUNNER_URL/v1/execute" \
             -H 'Content-Type: application/json' \
-            --data @horizon-runner-request.json | tee horizon-runner-response.json
+            --data @horizon-runner-request.json \
+            -o horizon-runner-response.json
+          cat horizon-runner-response.json
         '''
       }}
     }}
