@@ -66,6 +66,8 @@ ensure_environment_catalog_schema()
 JENKINS_URL = os.getenv("JENKINS_URL", "https://horizonrelevance.com/jenkins")
 JENKINS_USER = os.getenv("JENKINS_USER")
 JENKINS_TOKEN = os.getenv("JENKINS_TOKEN")
+JENKINS_EXECUTION_MODE = os.getenv("JENKINS_EXECUTION_MODE", "runner").strip().lower() or "runner"
+HORIZON_RUNNER_URL = os.getenv("HORIZON_RUNNER_URL", "http://horizon-runner:8080").strip() or "http://horizon-runner:8080"
 JENKINS_RUNTIME_ROLE_ARN = os.getenv("JENKINS_RUNTIME_ROLE_ARN", "").strip()
 ENVIRONMENT_PREFLIGHT_ENFORCED = os.getenv("ENVIRONMENT_PREFLIGHT_ENFORCED", "false").strip().lower() == "true"
 ENVIRONMENT_IAM_MODE = os.getenv("ENVIRONMENT_IAM_MODE", "validation-only").strip() or "validation-only"
@@ -129,6 +131,112 @@ def jenkins_failure_response(action: str, response: requests.Response):
             "jenkins_response": body[:1000],
         },
     )
+
+def groovy_string(value: Any) -> str:
+    return str(value or "").replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+def build_parameter_definitions(values: Dict[str, Any], bool_param_names: List[str]) -> str:
+    definitions = []
+    bool_params = set(bool_param_names)
+    for name, value in values.items():
+        default_value = str(value).lower() if name in bool_params else str(value or "")
+        escaped_default = escape(default_value, quote=True)
+        if name in bool_params:
+            definitions.append(f"""
+        <hudson.model.BooleanParameterDefinition>
+          <name>{name}</name>
+          <defaultValue>{escaped_default}</defaultValue>
+          <description>{name}</description>
+        </hudson.model.BooleanParameterDefinition>""")
+        else:
+            definitions.append(f"""
+        <hudson.model.StringParameterDefinition>
+          <name>{name}</name>
+          <defaultValue>{escaped_default}</defaultValue>
+          <description>{name}</description>
+        </hudson.model.StringParameterDefinition>""")
+    return "".join(definitions)
+
+def build_runner_job_config(
+    *,
+    description: str,
+    values: Dict[str, Any],
+    bool_param_names: List[str],
+) -> str:
+    parameter_definitions = build_parameter_definitions(values, bool_param_names)
+    bool_params = set(bool_param_names)
+    parameter_lines = []
+    for name in values.keys():
+        fallback = "false" if name in bool_params else ""
+        parameter_lines.append(
+            f'            "{name}": (params.{name} == null ? "{fallback}" : params.{name}.toString()),'
+        )
+    parameters_block = "\n".join(parameter_lines).rstrip(",")
+    pipeline_kind = groovy_string(values.get("PIPELINE_KIND", "DEVOPS"))
+    service_name = groovy_string(values.get("SERVICE_NAME", "Horizon Pipeline"))
+    script = f"""import groovy.json.JsonOutput
+
+pipeline {{
+  agent any
+  options {{
+    timestamps()
+    disableConcurrentBuilds()
+  }}
+  stages {{
+    stage('Horizon Execution Plan') {{
+      steps {{
+        script {{
+          def request = [
+            pipelineType: params.PIPELINE_KIND ?: "{pipeline_kind}",
+            pipelineKind: params.PIPELINE_KIND ?: "{pipeline_kind}",
+            serviceName: params.SERVICE_NAME ?: "{service_name}",
+            requestId: "${{env.JOB_NAME}}-${{env.BUILD_NUMBER}}",
+            jobName: env.JOB_NAME,
+            buildNumber: env.BUILD_NUMBER,
+            buildUrl: env.BUILD_URL,
+            executionMode: "thin-runner",
+            parameters: [
+{parameters_block}
+            ],
+            payload: [
+{parameters_block}
+            ]
+          ]
+          writeFile file: 'horizon-runner-request.json', text: JsonOutput.prettyPrint(JsonOutput.toJson(request))
+        }}
+        sh '''
+          set -euo pipefail
+          RUNNER_URL="${{HORIZON_RUNNER_URL:-%s}}"
+          curl -fsS -X POST "$RUNNER_URL/v1/execute" \
+            -H 'Content-Type: application/json' \
+            --data @horizon-runner-request.json | tee horizon-runner-response.json
+        '''
+      }}
+    }}
+  }}
+  post {{
+    always {{
+      archiveArtifacts artifacts: 'horizon-runner-request.json,horizon-runner-response.json', allowEmptyArchive: true
+    }}
+  }}
+}}
+""" % groovy_string(HORIZON_RUNNER_URL)
+    return f"""
+<flow-definition plugin="workflow-job">
+  <description>{escape(description, quote=True)}</description>
+  <properties>
+    <hudson.model.ParametersDefinitionProperty>
+      <parameterDefinitions>
+        {parameter_definitions}
+      </parameterDefinitions>
+    </hudson.model.ParametersDefinitionProperty>
+  </properties>
+  <definition class="org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition" plugin="workflow-cps">
+    <script>{escape(script, quote=False)}</script>
+    <sandbox>true</sandbox>
+  </definition>
+</flow-definition>
+"""
 
 # GitHub webhook secret
 GITHUB_WEBHOOK_SECRET = os.environ["GITHUB_WEBHOOK_SECRET"]
@@ -1903,67 +2011,23 @@ def create_pipeline(
     request: PipelineRequest,
     principal: AuthPrincipal = Depends(require_roles(ROLE_PLATFORM_ADMIN, ROLE_DEVELOPER)),
 ):
-    job_config = f"""
-<flow-definition plugin="workflow-job">
-  <description>Dynamic Jenkins Pipeline for {request.project_name}</description>
-  <properties>
-    <hudson.model.ParametersDefinitionProperty>
-      <parameterDefinitions>
-        <hudson.model.StringParameterDefinition>
-          <name>APP_TYPE</name>
-          <defaultValue>{request.app_type}</defaultValue>
-          <description>Application Type</description>
-        </hudson.model.StringParameterDefinition>
-        <hudson.model.StringParameterDefinition>
-          <name>REPO_URL</name>
-          <defaultValue>{request.repo_url}</defaultValue>
-          <description>Git Repository URL</description>
-        </hudson.model.StringParameterDefinition>
-        <hudson.model.StringParameterDefinition>
-          <name>BRANCH</name>
-          <defaultValue>{request.branch}</defaultValue>
-          <description>Git Branch</description>
-        </hudson.model.StringParameterDefinition>
-        <hudson.model.StringParameterDefinition>
-          <name>CREDENTIALS_ID</name>
-          <defaultValue>github-token</defaultValue>
-          <description>Jenkins GitHub Credential ID</description>
-        </hudson.model.StringParameterDefinition>
-        <hudson.model.BooleanParameterDefinition>
-          <name>ENABLE_SONARQUBE</name>
-          <defaultValue>{str(request.ENABLE_SONARQUBE).lower()}</defaultValue>
-          <description>Enable SonarQube Scan</description>
-        </hudson.model.BooleanParameterDefinition>
-        <hudson.model.BooleanParameterDefinition>
-          <name>ENABLE_OPA</name>
-          <defaultValue>{str(request.ENABLE_OPA).lower()}</defaultValue>
-          <description>Enable OPA Scan</description>
-        </hudson.model.BooleanParameterDefinition>
-        <hudson.model.BooleanParameterDefinition>
-          <name>ENABLE_TRIVY</name>
-          <defaultValue>{str(request.ENABLE_TRIVY).lower()}</defaultValue>
-          <description>Enable Trivy Scan</description>
-        </hudson.model.BooleanParameterDefinition>
-      </parameterDefinitions>
-    </hudson.model.ParametersDefinitionProperty>
-  </properties>
-  <definition class="org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition" plugin="workflow-cps">
-    <script>
-@Library('jenkins-shared-library@main') _
-main_template([
-  APP_TYPE: "${{APP_TYPE}}",
-  REPO_URL: "${{REPO_URL}}",
-  BRANCH: "${{BRANCH}}",
-  CREDENTIALS_ID: "${{CREDENTIALS_ID}}",
-  ENABLE_SONARQUBE: "${{ENABLE_SONARQUBE}}",
-  ENABLE_OPA: "${{ENABLE_OPA}}",
-  ENABLE_TRIVY: "${{ENABLE_TRIVY}}"
-])
-    </script>
-    <sandbox>true</sandbox>
-  </definition>
-</flow-definition>
-"""
+    values = {
+        "APP_TYPE": request.app_type,
+        "REPO_URL": request.repo_url,
+        "BRANCH": request.branch,
+        "CREDENTIALS_ID": "github-token",
+        "PIPELINE_KIND": "DEVOPS",
+        "SERVICE_NAME": "Build & Deploy Pipeline",
+        "ENABLE_SONARQUBE": str(request.ENABLE_SONARQUBE).lower(),
+        "ENABLE_OPA": str(request.ENABLE_OPA).lower(),
+        "ENABLE_TRIVY": str(request.ENABLE_TRIVY).lower(),
+    }
+    bool_param_names = ["ENABLE_SONARQUBE", "ENABLE_OPA", "ENABLE_TRIVY"]
+    job_config = build_runner_job_config(
+        description=f"Dynamic Jenkins Pipeline for {request.project_name}",
+        values=values,
+        bool_param_names=bool_param_names,
+    )
     create_response = requests.post(
         f"{JENKINS_URL}/createItem?name={request.project_name}",
         headers=jenkins_headers("application/xml"),
@@ -2113,52 +2177,16 @@ def create_devops_pipeline(
         "ENABLE_NOTIFICATIONS": str(notification_requested).lower(),
         "SNS_TOPIC_ARN": env_values["SNS_TOPIC_ARN"],
     }
-    xml_values = {k: escape(v, quote=True) for k, v in values.items()}
     bool_param_names = [
         "ENABLE_SONARQUBE", "ENABLE_CHECKMARX", "ENABLE_SOAPUI", "ENABLE_JMETER",
         "ENABLE_SELENIUM", "ENABLE_NEWMAN", "ENABLE_RESTASSURED", "ENABLE_UFT",
         "ENABLE_TRIVY", "ENABLE_OPA", "ENABLE_NOTIFICATIONS",
     ]
-    string_param_names = [name for name in values.keys() if name not in bool_param_names]
-
-    parameter_definitions = []
-    for name in string_param_names:
-        parameter_definitions.append(f"""
-        <hudson.model.StringParameterDefinition>
-          <name>{name}</name>
-          <defaultValue>{xml_values[name]}</defaultValue>
-          <description>{name}</description>
-        </hudson.model.StringParameterDefinition>""")
-    for name in bool_param_names:
-        parameter_definitions.append(f"""
-        <hudson.model.BooleanParameterDefinition>
-          <name>{name}</name>
-          <defaultValue>{xml_values[name]}</defaultValue>
-          <description>{name}</description>
-        </hudson.model.BooleanParameterDefinition>""")
-
-    params_map = "\n".join([f'  {name}: "${{{name}}}",' for name in values.keys()]).rstrip(',')
-    job_config = f"""
-<flow-definition plugin="workflow-job">
-  <description>Build & Deploy Pipeline for {xml_values["PROJECT_NAME"]}</description>
-  <properties>
-    <hudson.model.ParametersDefinitionProperty>
-      <parameterDefinitions>
-        {''.join(parameter_definitions)}
-      </parameterDefinitions>
-    </hudson.model.ParametersDefinitionProperty>
-  </properties>
-  <definition class="org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition" plugin="workflow-cps">
-    <script>
-@Library('jenkins-shared-library@main') _
-main_template([
-{params_map}
-])
-    </script>
-    <sandbox>true</sandbox>
-  </definition>
-</flow-definition>
-"""
+    job_config = build_runner_job_config(
+        description=f"Build & Deploy Pipeline for {values['PROJECT_NAME']}",
+        values=values,
+        bool_param_names=bool_param_names,
+    )
 
     job_url = f"{JENKINS_URL}/job/{job_name}/api/json"
     job_check = requests.get(job_url, auth=(JENKINS_USER, JENKINS_TOKEN), verify=False)
@@ -2338,52 +2366,16 @@ def create_test_devops_pipeline(
         "ENABLE_NOTIFICATIONS": str(notification_requested).lower(),
         "SNS_TOPIC_ARN": env_values["SNS_TOPIC_ARN"],
     }
-    xml_values = {k: escape(v, quote=True) for k, v in values.items()}
     bool_param_names = [
         "ENABLE_SONARQUBE", "ENABLE_CHECKMARX", "ENABLE_SOAPUI", "ENABLE_JMETER",
         "ENABLE_SELENIUM", "ENABLE_NEWMAN", "ENABLE_RESTASSURED", "ENABLE_UFT",
         "ENABLE_TRIVY", "ENABLE_OPA", "ENABLE_NOTIFICATIONS", "NEWMAN_FAIL_ON_ERROR",
     ]
-    string_param_names = [name for name in values.keys() if name not in bool_param_names]
-
-    parameter_definitions = []
-    for name in string_param_names:
-        parameter_definitions.append(f"""
-        <hudson.model.StringParameterDefinition>
-          <name>{name}</name>
-          <defaultValue>{xml_values[name]}</defaultValue>
-          <description>{name}</description>
-        </hudson.model.StringParameterDefinition>""")
-    for name in bool_param_names:
-        parameter_definitions.append(f"""
-        <hudson.model.BooleanParameterDefinition>
-          <name>{name}</name>
-          <defaultValue>{xml_values[name]}</defaultValue>
-          <description>{name}</description>
-        </hudson.model.BooleanParameterDefinition>""")
-
-    params_map = "\n".join([f'  {name}: "${{{name}}}",' for name in values.keys()]).rstrip(',')
-    job_config = f"""
-<flow-definition plugin="workflow-job">
-  <description>Validation Pipeline for {xml_values["PROJECT_NAME"]}</description>
-  <properties>
-    <hudson.model.ParametersDefinitionProperty>
-      <parameterDefinitions>
-        {''.join(parameter_definitions)}
-      </parameterDefinitions>
-    </hudson.model.ParametersDefinitionProperty>
-  </properties>
-  <definition class="org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition" plugin="workflow-cps">
-    <script>
-@Library('jenkins-shared-library@main') _
-main_template([
-{params_map}
-])
-    </script>
-    <sandbox>true</sandbox>
-  </definition>
-</flow-definition>
-"""
+    job_config = build_runner_job_config(
+        description=f"Validation Pipeline for {values['PROJECT_NAME']}",
+        values=values,
+        bool_param_names=bool_param_names,
+    )
 
     job_url = f"{JENKINS_URL}/job/{job_name}/api/json"
     job_check = requests.get(job_url, auth=(JENKINS_USER, JENKINS_TOKEN), verify=False)
@@ -2595,93 +2587,12 @@ def create_prod_devops_pipeline(
         "ENABLE_NOTIFICATIONS": str(notification_requested).lower(),
         "SNS_TOPIC_ARN": target_env_values["SNS_TOPIC_ARN"] or source_env_values["SNS_TOPIC_ARN"] or (request.sns_topic_arn or "").strip(),
     }
-    xml_values = {k: escape(v, quote=True) for k, v in values.items()}
-
     bool_param_names = ["SECRET_ENABLED", "REQUIRE_APPROVAL", "ENABLE_NOTIFICATIONS"]
-    string_param_names = [name for name in values.keys() if name not in bool_param_names]
-
-    parameter_definitions = []
-    for name in string_param_names:
-        parameter_definitions.append(f"""
-        <hudson.model.StringParameterDefinition>
-          <name>{name}</name>
-          <defaultValue>{xml_values[name]}</defaultValue>
-          <description>{name}</description>
-        </hudson.model.StringParameterDefinition>""")
-    for name in bool_param_names:
-        parameter_definitions.append(f"""
-        <hudson.model.BooleanParameterDefinition>
-          <name>{name}</name>
-          <defaultValue>{xml_values[name]}</defaultValue>
-          <description>{name}</description>
-        </hudson.model.BooleanParameterDefinition>""")
-
-    job_config = f"""
-<flow-definition plugin="workflow-job">
-  <description>Release Promotion Pipeline for {xml_values["PROJECT_NAME"]}</description>
-  <properties>
-    <hudson.model.ParametersDefinitionProperty>
-      <parameterDefinitions>
-        {''.join(parameter_definitions)}
-      </parameterDefinitions>
-    </hudson.model.ParametersDefinitionProperty>
-  </properties>
-  <definition class="org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition" plugin="workflow-cps">
-    <script>
-@Library('jenkins-shared-library@main') _
-main_template([
-  CLIENT_ID: "${{CLIENT_ID}}",
-  CLIENT_NAME: "${{CLIENT_NAME}}",
-  LICENSE_TYPE: "${{LICENSE_TYPE}}",
-  LICENSE_EXPIRES_AT: "${{LICENSE_EXPIRES_AT}}",
-  LICENSED_PIPELINES: "${{LICENSED_PIPELINES}}",
-  LICENSED_FEATURES: "${{LICENSED_FEATURES}}",
-  LICENSED_ENVIRONMENTS: "${{LICENSED_ENVIRONMENTS}}",
-  LICENSE_VALIDATION_MODE: "${{LICENSE_VALIDATION_MODE}}",
-  PROJECT_NAME: "${{PROJECT_NAME}}",
-  PIPELINE_KIND: "${{PIPELINE_KIND}}",
-  SERVICE_NAME: "${{SERVICE_NAME}}",
-  REQUESTED_BY: "${{REQUESTED_BY}}",
-  ARTIFACT_BUCKET: "${{ARTIFACT_BUCKET}}",
-  ARTIFACT_PREFIX: "${{ARTIFACT_PREFIX}}",
-  IMAGE_JSON_PATH: "${{IMAGE_JSON_PATH}}",
-  TEMPLATE_CONFIG_PATH: "${{TEMPLATE_CONFIG_PATH}}",
-  SOURCE_ENV: "${{SOURCE_ENV}}",
-  TARGET_ENV: "${{TARGET_ENV}}",
-  AWS_REGION: "${{AWS_REGION}}",
-  SOURCE_ECR_REGISTRY: "${{SOURCE_ECR_REGISTRY}}",
-  SOURCE_ECR_REPOSITORY: "${{SOURCE_ECR_REPOSITORY}}",
-  TARGET_ECR_REGISTRY: "${{TARGET_ECR_REGISTRY}}",
-  TARGET_ECR_REPOSITORY: "${{TARGET_ECR_REPOSITORY}}",
-  SOURCE_IMAGE_TAG: "${{SOURCE_IMAGE_TAG}}",
-  TARGET_IMAGE_TAG: "${{TARGET_IMAGE_TAG}}",
-  CLIENT_AWS_ROLE_ARN: "${{CLIENT_AWS_ROLE_ARN}}",
-  SOURCE_AWS_ROLE_ARN: "${{SOURCE_AWS_ROLE_ARN}}",
-  TARGET_AWS_ROLE_ARN: "${{TARGET_AWS_ROLE_ARN}}",
-  DEV_CLUSTER_NAME: "${{DEV_CLUSTER_NAME}}",
-  QA_CLUSTER_NAME: "${{QA_CLUSTER_NAME}}",
-  STAGE_CLUSTER_NAME: "${{STAGE_CLUSTER_NAME}}",
-  PROD_CLUSTER_NAME: "${{PROD_CLUSTER_NAME}}",
-  NAMESPACE_STRATEGY: "${{NAMESPACE_STRATEGY}}",
-  APP_NAMESPACE: "${{APP_NAMESPACE}}",
-  DEV_NAMESPACE: "${{DEV_NAMESPACE}}",
-  QA_NAMESPACE: "${{QA_NAMESPACE}}",
-  STAGE_NAMESPACE: "${{STAGE_NAMESPACE}}",
-  PROD_NAMESPACE: "${{PROD_NAMESPACE}}",
-  SECRET_ENABLED: "${{SECRET_ENABLED}}",
-  XID_ARRAY: "${{XID_ARRAY}}",
-  APPROVER: "${{APPROVER}}",
-  REQUIRE_APPROVAL: "${{REQUIRE_APPROVAL}}",
-  NOTIFY_EMAIL: "${{NOTIFY_EMAIL}}",
-  NOTIFY_CC: "${{NOTIFY_CC}}",
-  ENABLE_NOTIFICATIONS: "${{ENABLE_NOTIFICATIONS}}",
-  SNS_TOPIC_ARN: "${{SNS_TOPIC_ARN}}"
-])
-    </script>
-    <sandbox>true</sandbox>
-  </definition>
-</flow-definition>
-"""
+    job_config = build_runner_job_config(
+        description=f"Release Promotion Pipeline for {values['PROJECT_NAME']}",
+        values=values,
+        bool_param_names=bool_param_names,
+    )
 
     job_url = f"{JENKINS_URL}/job/{job_name}/api/json"
     job_check = requests.get(job_url, auth=(JENKINS_USER, JENKINS_TOKEN), verify=False)
@@ -3379,164 +3290,6 @@ from ldap3.utils.conv import escape_filter_chars
 #     except Exception as e:
 #         print("LDAP error:", e)
 #         return JSONResponse(status_code=500, content={"error": "Failed to fetch LDAP users"})
-
-# @app.post("/pipeline")
-# def create_pipeline(request: PipelineRequest):
-#     print("Received pipeline request:", request.dict())
-
-#     # Use Jenkins job parameters instead of hardcoding in the script
-#     job_config = f"""
-#     <flow-definition plugin="workflow-job">
-#       <actions/>
-#       <description>Dynamic Jenkins Pipeline for {request.project_name}</description>
-#       <keepDependencies>false</keepDependencies>
-#       <properties/>
-#       <definition class="org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition" plugin="workflow-cps">
-#         <script>
-#           @Library('jenkins-shared-library@main') _
-#           main_template(
-#             APP_TYPE: params.APP_TYPE,
-#             REPO_URL: params.REPO_URL,
-#             BRANCH: params.BRANCH,
-#             CREDENTIALS_ID: params.CREDENTIALS_ID,
-#             ENABLE_SONARQUBE: params.ENABLE_SONARQUBE,
-#             ENABLE_OPA: params.ENABLE_OPA,
-#             ENABLE_TRIVY: params.ENABLE_TRIVY
-#           )
-#         </script>
-#         <sandbox>true</sandbox>
-#       </definition>
-#       <triggers/>
-#       <disabled>false</disabled>
-#     </flow-definition>
-#     """
-
-#     # Define job parameters separately
-#     params_payload = {
-#         "name": request.project_name,
-#         "parameters": [
-#             {"name": "APP_TYPE", "value": request.app_type},
-#             {"name": "REPO_URL", "value": request.repo_url},
-#             {"name": "BRANCH", "value": request.branch},
-#             {"name": "CREDENTIALS_ID", "value": "github-token"},
-#             {"name": "ENABLE_SONARQUBE", "value": str(request.ENABLE_SONARQUBE).lower()},
-#             {"name": "ENABLE_OPA", "value": str(request.ENABLE_OPA).lower()},
-#             {"name": "ENABLE_TRIVY", "value": str(request.ENABLE_TRIVY).lower()}
-#         ]
-#     }
-
-#     # Create job
-#     create_response = requests.post(
-#         f"{JENKINS_URL}/createItem?name={request.project_name}",
-#         headers=jenkins_headers("application/xml"),
-#         auth=(JENKINS_USER, JENKINS_TOKEN),
-#         data=job_config,
-#         verify=False
-#     )
-#     print("Jenkins Create Response:", create_response.status_code, create_response.text)
-
-#     # Trigger build with parameters
-#     build_response = requests.post(
-#         f"{JENKINS_URL}/job/{request.project_name}/buildWithParameters",
-#         auth=(JENKINS_USER, JENKINS_TOKEN),
-#         params={p["name"]: p["value"] for p in params_payload["parameters"]},
-#         verify=False
-#     )
-#     print("Jenkins Build Trigger Response:", build_response.status_code, build_response.text)
-
-#     return {
-#         "status": "Pipeline created and triggered",
-#         "create_response_code": create_response.status_code,
-#         "build_response_code": build_response.status_code
-#     }
-
-# # @app.post("/pipeline")
-# # def create_pipeline(request: PipelineRequest):
-# #     print("Received pipeline request:", request.dict())
-
-# #     jenkinsfile_template = f"""
-# #     @Library('jenkins-shared-library@main') _
-# #     pipeline {{
-# #         agent any
-# #         stages {{
-# #             stage('Clone Repository') {{
-# #                 steps {{
-# #                     git credentialsId: 'github-token', url: '{request.repo_url}', branch: '{request.branch}'
-# #                 }}
-# #             }}
-# #             stage('Print Incoming Parameters') {{
-# #                 steps {{
-# #                     script {{
-# #                         echo "==== Incoming Parameters ===="
-# #                         params.each {{ key, value -> 
-# #                             echo "${{key}} = ${{value}}"
-# #                         }}
-# #                         echo "=============================="
-# #                     }}
-# #                 }}
-# #             }}
-# #             stage('Check Repository') {{
-# #                 steps {{
-# #                     script {{
-# #                         sh 'pwd'
-# #                         sh 'ls -lrth'
-# #                     }}
-# #                 }}
-# #             }}
-# #             stage('Load Application Pipeline') {{
-# #                 steps {{
-# #                     script {{
-# #                         main_template(APP_TYPE: '{request.app_type}', 
-# #                                       REPO_URL: '{request.repo_url}', 
-# #                                       BRANCH: '{request.branch}', 
-# #                                       CREDENTIALS_ID: 'github-token', 
-# #                                       ENABLE_SONARQUBE: {str(request.ENABLE_SONARQUBE).lower()}, 
-# #                                       ENABLE_OPA: {str(request.ENABLE_OPA).lower()},
-# #                                       ENABLE_TRIVY: {str(request.ENABLE_TRIVY).lower()})
-# #                     }}
-# #                 }}
-# #             }}
-# #         }}
-# #     }}
-# #     """
-
-# #     job_config = f"""
-# #     <flow-definition plugin="workflow-job">
-# #         <definition class="org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition" plugin="workflow-cps">
-# #             <script>{jenkinsfile_template}</script>
-# #             <sandbox>true</sandbox>
-# #         </definition>
-# #     </flow-definition>
-# #     """
-
-# #     create_response = requests.post(
-# #         f"{JENKINS_URL}/createItem?name={request.project_name}",
-# #         headers=jenkins_headers("application/xml"),
-# #         auth=(JENKINS_USER, JENKINS_TOKEN),
-# #         data=job_config,
-# #         verify=False
-# #     )
-# #     print("Jenkins Create Response:", create_response.status_code, create_response.text)
-
-# #     if create_response.status_code not in [200, 201]:
-# #         return {
-# #             "status": "Failed to create pipeline",
-# #             "create_response_code": create_response.status_code,
-# #             "jenkins_response": create_response.text
-# #         }
-
-# #     build_response = requests.post(
-# #         f"{JENKINS_URL}/job/{request.project_name}/build",
-# #         auth=(JENKINS_USER, JENKINS_TOKEN),
-# #         verify=False
-# #     )
-# #     print("Jenkins Build Trigger Response:", build_response.status_code, build_response.text)
-
-# #     return {
-# #         "status": "Pipeline created and triggered",
-# #         "create_response_code": create_response.status_code,
-# #         "build_response_code": build_response.status_code
-# #     }
 
 # @app.post("/pipeline/trigger")
 # def trigger_existing_pipeline(request: TriggerRequest):
