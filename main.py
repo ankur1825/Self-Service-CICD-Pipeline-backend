@@ -120,6 +120,13 @@ def jenkins_post(url: str, content_type: Optional[str] = None, data=None, params
         timeout=60,
     )
 
+def trigger_jenkins_parameterized_build(job_name: str, values: Dict[str, Any]) -> requests.Response:
+    return jenkins_post(
+        f"{JENKINS_URL}/job/{job_name}/buildWithParameters",
+        content_type="application/x-www-form-urlencoded",
+        data=values,
+    )
+
 def jenkins_failure_response(action: str, response: requests.Response):
     body = (response.text or "").strip()
     logger.error("Jenkins %s failed with status %s: %s", action, response.status_code, body[:500])
@@ -2049,10 +2056,9 @@ def create_pipeline(
         verify=False
     )
 
-    build_response = requests.post(
-        f"{JENKINS_URL}/job/{request.project_name}/buildWithParameters",
-        auth=(JENKINS_USER, JENKINS_TOKEN),
-        params={
+    build_response = trigger_jenkins_parameterized_build(
+        request.project_name,
+        {
             "APP_TYPE": request.app_type,
             "REPO_URL": request.repo_url,
             "BRANCH": request.branch,
@@ -2061,7 +2067,6 @@ def create_pipeline(
             "ENABLE_OPA": str(request.ENABLE_OPA).lower(),
             "ENABLE_TRIVY": str(request.ENABLE_TRIVY).lower()
         },
-        verify=False
     )
 
     return {
@@ -2217,7 +2222,7 @@ def create_devops_pipeline(
     if create_response_code not in (200, 201, 202):
         return jenkins_failure_response(f"{create_status} job '{job_name}'", create_response_obj)
 
-    build_response = jenkins_post(f"{JENKINS_URL}/job/{job_name}/buildWithParameters", params=values)
+    build_response = trigger_jenkins_parameterized_build(job_name, values)
     if build_response.status_code not in (200, 201, 202):
         return jenkins_failure_response(f"trigger build for job '{job_name}'", build_response)
 
@@ -2406,7 +2411,7 @@ def create_test_devops_pipeline(
     if create_response_code not in (200, 201, 202):
         return jenkins_failure_response(f"{create_status} job '{job_name}'", create_response_obj)
 
-    build_response = jenkins_post(f"{JENKINS_URL}/job/{job_name}/buildWithParameters", params=values)
+    build_response = trigger_jenkins_parameterized_build(job_name, values)
     if build_response.status_code not in (200, 201, 202):
         return jenkins_failure_response(f"trigger build for job '{job_name}'", build_response)
 
@@ -2631,10 +2636,7 @@ def create_prod_devops_pipeline(
     if create_response_code not in (200, 201, 202):
         return jenkins_failure_response(f"{create_status} job '{job_name}'", create_response_obj)
 
-    build_response = jenkins_post(
-        f"{JENKINS_URL}/job/{job_name}/buildWithParameters",
-        params=values,
-    )
+    build_response = trigger_jenkins_parameterized_build(job_name, values)
     if build_response.status_code not in (200, 201, 202):
         return jenkins_failure_response(f"trigger build for job '{job_name}'", build_response)
 
@@ -3136,7 +3138,11 @@ async def github_webhook(
             "ENABLE_TRIVY": "true"
         }
 
-        response = requests.post(jenkins_url, headers=jenkins_headers(), auth=(JENKINS_USER, JENKINS_TOKEN), params=params, verify=False)
+        response = jenkins_post(
+            jenkins_url,
+            content_type="application/x-www-form-urlencoded",
+            data=params,
+        )
 
         return {
             "status": "Triggered Jenkins job",
