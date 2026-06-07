@@ -290,6 +290,36 @@ def _contains(values: Iterable[str], expected: str) -> bool:
     return any(item.strip().lower() == expected_normalized for item in values)
 
 
+FEATURE_ALIASES = {
+    "api_regression": {"api_regression", "api_regression_test", "api_testing", "test_suites"},
+    "artifact_publish": {"artifact_publish", "artifact_publishing"},
+    "build": {"build", "build_deploy"},
+    "code_scan": {"code_scan", "code_quality", "code_quality_scan", "sonarqube"},
+    "image_scan": {"image_scan", "container_iac_scan", "container_scan", "container_vulnerability_scan"},
+    "performance_testing": {"performance_testing", "performance_test", "jmeter", "test_suites"},
+    "policy_scan": {"policy_scan", "policy_validation", "opa", "policy_validation_scan"},
+    "policy_validation": {"policy_scan", "policy_validation", "opa", "policy_validation_scan"},
+    "prod_deploy": {"prod_deploy", "production_promotion", "production_deployment", "release_promotion"},
+    "release_promotion": {"release_promotion", "production_promotion", "prod_deploy"},
+    "static_application_security": {
+        "static_application_security",
+        "static_security_scan",
+        "sast",
+        "checkmarx",
+        "code_scan",
+        "code_quality_scan",
+    },
+    "test_suites": {"test_suites", "ui_testing", "api_regression", "performance_testing"},
+    "ui_testing": {"ui_testing", "ui_end_to_end", "selenium", "test_suites"},
+}
+
+
+def _feature_enabled(enabled_features: Iterable[str], requested_feature: str) -> bool:
+    normalized = requested_feature.strip().lower()
+    accepted = FEATURE_ALIASES.get(normalized, {normalized})
+    return any(_contains(enabled_features, item) for item in accepted)
+
+
 def validate_license(
     license_doc: Dict[str, Any],
     pipeline_name: str,
@@ -353,7 +383,7 @@ def validate_license(
 
     enabled_features = license_doc.get("enabled_features") or []
     for feature in requested_features:
-        if enabled_features and not _contains(enabled_features, feature):
+        if enabled_features and not _feature_enabled(enabled_features, feature):
             raise LicenseValidationError(f"Feature '{feature}' is not enabled for this license.")
 
     license_doc["validation_mode"] = "enforced"
