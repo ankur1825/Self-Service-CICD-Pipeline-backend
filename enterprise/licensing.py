@@ -258,6 +258,15 @@ def default_license_from_env() -> Dict[str, Any]:
 
 def merge_request_license(request_values: Dict[str, Any]) -> Dict[str, Any]:
     license_doc = default_license_from_env()
+    license_mode = str(license_doc.get("license_mode") or os.getenv("ENTERPRISE_LICENSE_MODE", "")).strip().lower()
+    has_server_synced_license = bool(
+        license_doc.get("last_synced_at")
+        or license_doc.get("signature")
+        or license_doc.get("signature_mode")
+    )
+    if license_mode == "online-sync" and has_server_synced_license:
+        return license_doc
+
     for key in [
         "client_id",
         "client_name",
