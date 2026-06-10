@@ -101,6 +101,13 @@ spec:
               value: {{ .Values.ldap.roleGroupMappings | toJson | quote }}
             - name: ENVIRONMENT_CATALOG_FILE
               value: {{ .Values.environmentCatalog.configFile | quote }}
+            {{- if .Values.environmentCatalog.syncTokenSecret.existingSecret }}
+            - name: ENVIRONMENT_CATALOG_SYNC_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.environmentCatalog.syncTokenSecret.existingSecret | quote }}
+                  key: {{ .Values.environmentCatalog.syncTokenSecret.key | default "token" | quote }}
+            {{- end }}
             - name: GITHUB_WEBHOOK_SECRET
               valueFrom:
                 secretKeyRef:

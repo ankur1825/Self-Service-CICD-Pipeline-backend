@@ -935,11 +935,12 @@ def ldap_entry_values(entry, attribute: str) -> List[str]:
 def render_ldap_group_search_filter(user_dn: str) -> str:
     escaped_user_dn = escape_filter_chars(user_dn)
     configured_filter = (LDAP_GROUP_SEARCH_FILTER or "(objectClass=groupOfNames)").strip()
-    if "{user_dn}" in configured_filter or "{user_dn_escaped}" in configured_filter:
+    if any(token in configured_filter for token in ("{user_dn}", "{user_dn_escaped}", "{0}")):
         return (
             configured_filter
             .replace("{user_dn_escaped}", escaped_user_dn)
             .replace("{user_dn}", escaped_user_dn)
+            .replace("{0}", escaped_user_dn)
         )
     return f"(&{configured_filter}({LDAP_GROUP_MEMBER_ATTRIBUTE}={escaped_user_dn}))"
 

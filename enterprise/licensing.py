@@ -290,6 +290,36 @@ def _contains(values: Iterable[str], expected: str) -> bool:
     return any(item.strip().lower() == expected_normalized for item in values)
 
 
+PIPELINE_ALIASES = {
+    "build & deploy pipeline": {
+        "build & deploy pipeline",
+        "devops pipeline",
+        "self-service ci/cd pipeline",
+    },
+    "validation pipeline": {
+        "validation pipeline",
+        "test devops pipeline",
+        "test devsecops pipeline",
+    },
+    "release promotion pipeline": {
+        "release promotion pipeline",
+        "prod devops pipeline",
+        "production release pipeline",
+    },
+}
+
+
+def _contains_pipeline(values: Iterable[str], expected: str) -> bool:
+    expected_normalized = expected.strip().lower()
+    accepted_names = {expected_normalized}
+    for canonical_name, aliases in PIPELINE_ALIASES.items():
+        if expected_normalized == canonical_name or expected_normalized in aliases:
+            accepted_names = set(aliases)
+            accepted_names.add(canonical_name)
+            break
+    return any(item.strip().lower() in accepted_names for item in values)
+
+
 FEATURE_ALIASES = {
     "api_regression": {"api_regression", "api_regression_test", "api_testing", "test_suites"},
     "artifact_publish": {"artifact_publish", "artifact_publishing"},
@@ -365,7 +395,7 @@ def validate_license(
             raise LicenseValidationError("License is expired.")
 
     enabled_pipelines = license_doc.get("enabled_pipelines") or []
-    if enabled_pipelines and not _contains(enabled_pipelines, pipeline_name):
+    if enabled_pipelines and not _contains_pipeline(enabled_pipelines, pipeline_name):
         raise LicenseValidationError(f"Pipeline '{pipeline_name}' is not enabled for this license.")
 
     allowed_environments = license_doc.get("allowed_environments") or []

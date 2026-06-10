@@ -133,6 +133,9 @@ enterprise:
 environmentCatalog:
   enabled: true
   configFile: /app/config/environment-catalog.json
+  syncTokenSecret:
+    existingSecret: ""
+    key: token
   environments:
     - name: DEV
       display_name: Development
