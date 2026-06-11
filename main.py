@@ -142,6 +142,44 @@ def jenkins_failure_response(action: str, response: requests.Response):
 def groovy_string(value: Any) -> str:
     return str(value or "").replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
+def groovy_single_quoted(value: Any) -> str:
+    return str(value or "").replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n")
+
+def runner_bool_value(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+def runner_pipeline_key(values: Dict[str, Any]) -> str:
+    return re.sub(r"[^A-Z0-9]+", "_", str(values.get("PIPELINE_KIND") or "").strip().upper()).strip("_")
+
+def runner_stage_plan(values: Dict[str, Any]) -> List[Dict[str, Any]]:
+    pipeline_key = runner_pipeline_key(values)
+    if pipeline_key in {"TEST", "VALIDATION", "VALIDATE", "TEST_DEVOPS", "TEST_DEVSECOPS"}:
+        stages = [{"key": "checkout", "name": "Checkout"}]
+        validation_gates = [
+            ("ENABLE_SELENIUM", "ui-test", "UI End-to-End Test"),
+            ("ENABLE_NEWMAN", "api-test", "API Regression Test"),
+            ("ENABLE_JMETER", "performance-test", "Performance Test"),
+            ("ENABLE_SONARQUBE", "code-quality", "Code Quality Scan"),
+            ("ENABLE_CHECKMARX", "static-security", "Static Security Scan"),
+            ("ENABLE_TRIVY", "container-iac", "Container / IaC Vulnerability Scan"),
+            ("ENABLE_OPA", "policy-validation", "Policy Validation"),
+        ]
+        stages.extend(
+            {"key": stage_key, "name": stage_name, "continueOnFailure": True}
+            for flag, stage_key, stage_name in validation_gates
+            if runner_bool_value(values.get(flag))
+        )
+        stages.append({"key": "validation-results", "name": "Publish Validation Results"})
+        return stages
+
+    return [
+        {"key": "checkout", "name": "Checkout"},
+        {"key": "scan", "name": "Scan"},
+        {"key": "build", "name": "Build"},
+        {"key": "publish", "name": "Publish"},
+        {"key": "deploy", "name": "Deploy"},
+    ]
+
 def build_parameter_definitions(values: Dict[str, Any], bool_param_names: List[str]) -> str:
     definitions = []
     bool_params = set(bool_param_names)
@@ -181,7 +219,119 @@ def build_runner_job_config(
     parameters_block = "\n".join(parameter_lines).rstrip(",")
     pipeline_kind = groovy_string(values.get("PIPELINE_KIND", "DEVOPS"))
     service_name = groovy_string(values.get("SERVICE_NAME", "Horizon Pipeline"))
+    runner_url = groovy_string(HORIZON_RUNNER_URL)
+    stage_blocks = []
+    for stage in runner_stage_plan(values):
+        runner_call = f'runHorizonRunnerStage("{groovy_string(stage["key"])}", "{groovy_string(stage["name"])}")'
+        if stage.get("continueOnFailure"):
+            stage_body = f"""          catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {{
+            {runner_call}
+          }}"""
+        else:
+            stage_body = f"          {runner_call}"
+        stage_blocks.append(f"""    stage('{groovy_single_quoted(stage["name"])}') {{
+      steps {{
+        script {{
+{stage_body}
+        }}
+      }}
+    }}""")
+    stage_blocks_text = "\n".join(stage_blocks)
     script = f"""import groovy.json.JsonOutput
+
+def runHorizonRunnerStage(String stageKey, String stageName) {{
+  def request = [
+    pipelineType: params.PIPELINE_KIND ?: "{pipeline_kind}",
+    pipelineKind: params.PIPELINE_KIND ?: "{pipeline_kind}",
+    serviceName: params.SERVICE_NAME ?: "{service_name}",
+    requestId: "${{env.JOB_NAME}}-${{env.BUILD_NUMBER}}",
+    jobName: env.JOB_NAME,
+    buildNumber: env.BUILD_NUMBER,
+    buildUrl: env.BUILD_URL,
+    executionMode: "thin-runner",
+    executionStage: stageKey,
+    stageName: stageName,
+    parameters: [
+{parameters_block}
+    ],
+    payload: [
+{parameters_block}
+    ]
+  ]
+  def requestFile = "horizon-runner-request-${{stageKey}}.json"
+  def responseFile = "horizon-runner-response-${{stageKey}}.json"
+  writeFile file: requestFile, text: JsonOutput.prettyPrint(JsonOutput.toJson(request))
+  withEnv([
+    "HORIZON_RUNNER_STAGE=${{stageName}}",
+    "HORIZON_RUNNER_REQUEST_FILE=${{requestFile}}",
+    "HORIZON_RUNNER_RESPONSE_FILE=${{responseFile}}",
+    "HORIZON_RUNNER_URL_DEFAULT={runner_url}"
+  ]) {{
+    sh label: "Horizon Runner: ${{stageName}}", script: '''
+      set -eu
+      RUNNER_URL="${{HORIZON_RUNNER_URL:-$HORIZON_RUNNER_URL_DEFAULT}}"
+      echo "Calling Horizon Runner stage: $HORIZON_RUNNER_STAGE"
+      echo "Runner URL: $RUNNER_URL"
+      http_code="$(curl -sS -o "$HORIZON_RUNNER_RESPONSE_FILE" -w "%{{http_code}}" \
+        -X POST "$RUNNER_URL/v1/execute" \
+        -H 'Content-Type: application/json' \
+        --data @"$HORIZON_RUNNER_REQUEST_FILE")" || {{
+          rc=$?
+          echo "Horizon Runner request failed before an HTTP response. curl exit code: $rc"
+          test ! -s "$HORIZON_RUNNER_RESPONSE_FILE" || cat "$HORIZON_RUNNER_RESPONSE_FILE"
+          exit "$rc"
+        }}
+      echo "Horizon Runner HTTP status: $http_code"
+      test ! -s "$HORIZON_RUNNER_RESPONSE_FILE" || cat "$HORIZON_RUNNER_RESPONSE_FILE"
+      echo
+      if command -v python3 >/dev/null 2>&1; then
+        python3 - "$HORIZON_RUNNER_RESPONSE_FILE" <<'PY' || true
+import json
+import sys
+
+try:
+    response = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+
+reports = ((response.get("reportSummary") or dict()).get("reports") or [])
+if reports:
+    print("== Horizon validation evidence ==")
+for report in reports:
+    title = report.get("toolName") or report.get("tool") or "report"
+    print("Evidence: %s | status=%s | reportDir=%s" % (title, report.get("status", "unknown"), report.get("reportDir", "n/a")))
+    if report.get("totalTests") is not None:
+        print(
+            "Tests: total=%s passed=%s failed=%s errors=%s skipped=%s duration=%ss" % (
+                report.get("totalTests", 0),
+                report.get("passedTests", 0),
+                report.get("failedTests", 0),
+                report.get("errorTests", 0),
+                report.get("skippedTests", 0),
+                report.get("durationSeconds", 0),
+            )
+        )
+    cases = report.get("testCases") or []
+    for test_case in cases[:20]:
+        class_name = (test_case.get("className") + " - ") if test_case.get("className") else ""
+        print(" - [%s] %s%s" % (test_case.get("status", "UNKNOWN"), class_name, test_case.get("name", "unnamed test")))
+    if len(cases) > 20:
+        print(" - ... %s more test cases in the published report" % (len(cases) - 20))
+    if report.get("s3Uri"):
+        print("S3 evidence: %s" % report.get("s3Uri"))
+PY
+      fi
+      case "$http_code" in
+        2*) ;;
+        *)
+          echo "Horizon Runner stage '$HORIZON_RUNNER_STAGE' failed with HTTP $http_code."
+          echo "See $HORIZON_RUNNER_RESPONSE_FILE above for the runner error detail."
+          exit 1
+          ;;
+      esac
+    '''
+  }}
+}}
 
 pipeline {{
   agent any
@@ -189,46 +339,15 @@ pipeline {{
     disableConcurrentBuilds()
   }}
   stages {{
-    stage('Horizon Execution Plan') {{
-      steps {{
-        script {{
-          def request = [
-            pipelineType: params.PIPELINE_KIND ?: "{pipeline_kind}",
-            pipelineKind: params.PIPELINE_KIND ?: "{pipeline_kind}",
-            serviceName: params.SERVICE_NAME ?: "{service_name}",
-            requestId: "${{env.JOB_NAME}}-${{env.BUILD_NUMBER}}",
-            jobName: env.JOB_NAME,
-            buildNumber: env.BUILD_NUMBER,
-            buildUrl: env.BUILD_URL,
-            executionMode: "thin-runner",
-            parameters: [
-{parameters_block}
-            ],
-            payload: [
-{parameters_block}
-            ]
-          ]
-          writeFile file: 'horizon-runner-request.json', text: JsonOutput.prettyPrint(JsonOutput.toJson(request))
-        }}
-        sh '''
-          set -eu
-          RUNNER_URL="${{HORIZON_RUNNER_URL:-%s}}"
-          curl -fsS -X POST "$RUNNER_URL/v1/execute" \
-            -H 'Content-Type: application/json' \
-            --data @horizon-runner-request.json \
-            -o horizon-runner-response.json
-          cat horizon-runner-response.json
-        '''
-      }}
-    }}
+{stage_blocks_text}
   }}
   post {{
     always {{
-      archiveArtifacts artifacts: 'horizon-runner-request.json,horizon-runner-response.json', allowEmptyArchive: true
+      archiveArtifacts artifacts: 'horizon-runner-request*.json,horizon-runner-response*.json', allowEmptyArchive: true
     }}
   }}
 }}
-""" % groovy_string(HORIZON_RUNNER_URL)
+"""
     return f"""
 <flow-definition plugin="workflow-job">
   <description>{escape(description, quote=True)}</description>
