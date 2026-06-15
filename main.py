@@ -62,6 +62,32 @@ def ensure_environment_catalog_schema() -> None:
 
 ensure_environment_catalog_schema()
 
+
+def ensure_vulnerability_schema() -> None:
+    """Add optional enterprise finding metadata columns for existing client installs."""
+    with engine.begin() as connection:
+        columns = {
+            row[1]
+            for row in connection.execute(text("PRAGMA table_info(vulnerabilities)")).fetchall()
+        }
+        additions = {
+            "policy_bundle": "ALTER TABLE vulnerabilities ADD COLUMN policy_bundle VARCHAR",
+            "policy_version": "ALTER TABLE vulnerabilities ADD COLUMN policy_version VARCHAR",
+            "policy_ref": "ALTER TABLE vulnerabilities ADD COLUMN policy_ref VARCHAR",
+            "policy_decision": "ALTER TABLE vulnerabilities ADD COLUMN policy_decision VARCHAR",
+            "waiver_status": "ALTER TABLE vulnerabilities ADD COLUMN waiver_status VARCHAR",
+            "waiver_expiry": "ALTER TABLE vulnerabilities ADD COLUMN waiver_expiry VARCHAR",
+            "waiver_reason": "ALTER TABLE vulnerabilities ADD COLUMN waiver_reason TEXT",
+            "waiver_approved_by": "ALTER TABLE vulnerabilities ADD COLUMN waiver_approved_by VARCHAR",
+            "evidence_uri": "ALTER TABLE vulnerabilities ADD COLUMN evidence_uri VARCHAR",
+        }
+        for column, ddl in additions.items():
+            if column not in columns:
+                connection.execute(text(ddl))
+
+
+ensure_vulnerability_schema()
+
 # Jenkins configuration
 JENKINS_URL = os.getenv("JENKINS_URL", "https://horizonrelevance.com/jenkins")
 JENKINS_USER = os.getenv("JENKINS_USER")
@@ -659,6 +685,15 @@ class VulnerabilityModel(BaseModel):
     jenkins_job: Optional[str] = None
     build_number: Optional[int] = None
     jenkins_url: Optional[str] = None
+    policy_bundle: Optional[str] = None
+    policy_version: Optional[str] = None
+    policy_ref: Optional[str] = None
+    policy_decision: Optional[str] = None
+    waiver_status: Optional[str] = None
+    waiver_expiry: Optional[str] = None
+    waiver_reason: Optional[str] = None
+    waiver_approved_by: Optional[str] = None
+    evidence_uri: Optional[str] = None
 
 class VulnerabilityUpload(BaseModel):
     vulnerabilities: List[VulnerabilityModel]
@@ -3100,10 +3135,20 @@ def serialize_security_finding(v: Vulnerability) -> dict:
         "jenkins_job": v.jenkins_job,
         "build_number": v.build_number,
         "jenkins_url": v.jenkins_url,
+        "policy_bundle": v.policy_bundle,
+        "policy_version": v.policy_version,
+        "policy_ref": v.policy_ref,
+        "policy_decision": v.policy_decision,
+        "waiver_status": v.waiver_status,
+        "waiver_expiry": v.waiver_expiry,
+        "waiver_reason": v.waiver_reason,
+        "waiver_approved_by": v.waiver_approved_by,
+        "evidence_uri": v.evidence_uri,
         "traceability": {
             "jenkins_job": v.jenkins_job,
             "build_number": v.build_number,
             "jenkins_url": v.jenkins_url,
+            "evidence_uri": v.evidence_uri,
         },
     }
     
@@ -3191,7 +3236,16 @@ def upload_vulnerabilities(payload: UploadPayload, db: Session = Depends(get_db)
                 predicted_severity=v.predictedSeverity,
                 jenkins_job=payload.jenkins_job,
                 build_number=payload.build_number,
-                jenkins_url=payload.jenkins_url
+                jenkins_url=payload.jenkins_url,
+                policy_bundle=v.policy_bundle,
+                policy_version=v.policy_version,
+                policy_ref=v.policy_ref,
+                policy_decision=v.policy_decision,
+                waiver_status=v.waiver_status,
+                waiver_expiry=v.waiver_expiry,
+                waiver_reason=v.waiver_reason,
+                waiver_approved_by=v.waiver_approved_by,
+                evidence_uri=v.evidence_uri,
             )
             db.add(vuln)
             count += 1

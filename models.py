@@ -54,6 +54,15 @@ class Vulnerability(Base):
     jenkins_job = Column(String)
     build_number = Column(Integer)
     jenkins_url = Column(String, nullable=True)
+    policy_bundle = Column(String, nullable=True)
+    policy_version = Column(String, nullable=True)
+    policy_ref = Column(String, nullable=True)
+    policy_decision = Column(String, nullable=True)
+    waiver_status = Column(String, nullable=True)
+    waiver_expiry = Column(String, nullable=True)
+    waiver_reason = Column(Text, nullable=True)
+    waiver_approved_by = Column(String, nullable=True)
+    evidence_uri = Column(String, nullable=True)
 
     application = relationship("Application", back_populates="vulnerabilities")
 
