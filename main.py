@@ -656,8 +656,8 @@ class VulnerabilityModel(BaseModel):
     rule: Optional[str] = None
     status: Optional[str] = None
     predictedSeverity: Optional[str] = None
-    jenkins_job: str
-    build_number: int
+    jenkins_job: Optional[str] = None
+    build_number: Optional[int] = None
     jenkins_url: Optional[str] = None
 
 class VulnerabilityUpload(BaseModel):

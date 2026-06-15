@@ -4,7 +4,7 @@ replicaCount: 1
 
 image:
   repository: 426946630837.dkr.ecr.us-east-1.amazonaws.com/horizon/backend
-  tag: "1.4.33"
+  tag: "1.4.50"
   pullPolicy: Always
 
 imagePullSecrets: []
@@ -100,7 +100,7 @@ enterprise:
   installationId: ""
   awsAccountId: ""
   awsRegion: us-east-1
-  productVersion: "1.4.33"
+  productVersion: "1.4.50"
   maxRepos: "999999"
   maxBuildsPerMonth: "999999"
   maxUsers: "999999"
