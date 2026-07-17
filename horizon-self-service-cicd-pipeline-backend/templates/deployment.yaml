@@ -3,6 +3,8 @@ kind: Deployment
 metadata:
   name: {{ include "horizon-self-service-cicd-pipeline-backend.fullname" . }}
   namespace: {{ .Values.namespaceOverride }}
+  labels:
+    {{- include "horizon-self-service-cicd-pipeline-backend.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
   selector:
@@ -12,11 +14,17 @@ spec:
     metadata:
       labels:
         app: {{ include "horizon-self-service-cicd-pipeline-backend.fullname" . }}
+        app.kubernetes.io/component: api
     spec:
+      serviceAccountName: {{ include "horizon-self-service-cicd-pipeline-backend.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automount }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- if and .Values.persistence.enabled .Values.persistence.fixPermissionsInitContainer.enabled }}
       initContainers:
         - name: fix-app-data-permissions
           image: busybox:1.36
@@ -26,13 +34,33 @@ spec:
           volumeMounts:
             - name: app-data
               mountPath: {{ .Values.persistence.mountPath }}
+      {{- end }}
       containers:
         - name: {{ include "horizon-self-service-cicd-pipeline-backend.fullname" . }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
           ports:
-            - containerPort: 8000
+            - name: http
+              containerPort: 8000
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.probes.liveness.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.probes.readiness.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
           env:
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
             - name: DB_PATH
               value: /app/data
             {{- if .Values.database.existingSecret }}
@@ -55,6 +83,7 @@ spec:
               value: {{ .Values.cloudMigration.aws.enabled | quote }}
             - name: CLOUD_MIGRATION_AWS_EXECUTION_ENABLED
               value: {{ .Values.cloudMigration.aws.executionEnabled | quote }}
+            {{- if .Values.jenkins.enabled }}
             - name: JENKINS_URL
               value: {{ .Values.jenkins.url | default "https://horizonrelevance.com/jenkins" | quote }}
             - name: JENKINS_USER
@@ -69,6 +98,7 @@ spec:
                   key: {{ .Values.jenkins.tokenKey | default "JENKINS_TOKEN" | quote }}
             - name: JENKINS_RUNTIME_ROLE_ARN
               value: {{ .Values.jenkins.runtimeRoleArn | default "" | quote }}
+            {{- end }}
             - name: ENVIRONMENT_PREFLIGHT_ENFORCED
               value: {{ .Values.environmentPreflight.enforce | quote }}
             - name: ENVIRONMENT_IAM_MODE
@@ -128,11 +158,13 @@ spec:
                   name: {{ .Values.environmentCatalog.syncTokenSecret.existingSecret | quote }}
                   key: {{ .Values.environmentCatalog.syncTokenSecret.key | default "token" | quote }}
             {{- end }}
+            {{- if .Values.githubWebhookSecret.name }}
             - name: GITHUB_WEBHOOK_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: github-webhook-secret
-                  key: GITHUB_WEBHOOK_SECRET
+                  name: {{ .Values.githubWebhookSecret.name | quote }}
+                  key: {{ .Values.githubWebhookSecret.key | quote }}
+            {{- end }}
             - name: ENTERPRISE_LICENSE_ENFORCEMENT_ENABLED
               value: {{ .Values.enterprise.licenseEnforcementEnabled | quote }}
             - name: ENTERPRISE_CLIENT_ID
@@ -239,10 +271,16 @@ spec:
               subPath: {{ .Values.enterprise.licenseDocumentSecret.key | quote }}
               readOnly: true
             {{- end }}
+            - name: tmp
+              mountPath: /tmp
       volumes:
         - name: app-data
+          {{- if .Values.persistence.enabled }}
           persistentVolumeClaim:
             claimName: {{ include "horizon-self-service-cicd-pipeline-backend.fullname" . }}-pvc
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
         {{- if .Values.environmentCatalog.enabled }}
         - name: environment-catalog
           configMap:
@@ -256,3 +294,5 @@ spec:
               - key: {{ .Values.enterprise.licenseDocumentSecret.key | quote }}
                 path: {{ .Values.enterprise.licenseDocumentSecret.key | quote }}
         {{- end }}
+        - name: tmp
+          emptyDir: {}

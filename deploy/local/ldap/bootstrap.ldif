@@ -1,0 +1,77 @@
+dn: ou=users,dc=horizonrelevance,dc=local
+objectClass: organizationalUnit
+ou: users
+
+dn: ou=groups,dc=horizonrelevance,dc=local
+objectClass: organizationalUnit
+ou: groups
+
+dn: uid=migration-admin,ou=users,dc=horizonrelevance,dc=local
+objectClass: inetOrgPerson
+uid: migration-admin
+cn: Migration Administrator
+sn: Administrator
+displayName: Migration Administrator
+mail: migration-admin@client.example
+userPassword: MigrationTest!2026
+
+dn: uid=migration-architect,ou=users,dc=horizonrelevance,dc=local
+objectClass: inetOrgPerson
+uid: migration-architect
+cn: Migration Architect
+sn: Architect
+displayName: Migration Architect
+mail: migration-architect@client.example
+userPassword: MigrationTest!2026
+
+dn: uid=migration-operator,ou=users,dc=horizonrelevance,dc=local
+objectClass: inetOrgPerson
+uid: migration-operator
+cn: Migration Operator
+sn: Operator
+displayName: Migration Operator
+mail: migration-operator@client.example
+userPassword: MigrationTest!2026
+
+dn: uid=migration-approver,ou=users,dc=horizonrelevance,dc=local
+objectClass: inetOrgPerson
+uid: migration-approver
+cn: Migration Approver
+sn: Approver
+displayName: Migration Approver
+mail: migration-approver@client.example
+userPassword: MigrationTest!2026
+
+dn: uid=migration-auditor,ou=users,dc=horizonrelevance,dc=local
+objectClass: inetOrgPerson
+uid: migration-auditor
+cn: Migration Auditor
+sn: Auditor
+displayName: Migration Auditor
+mail: migration-auditor@client.example
+userPassword: MigrationTest!2026
+
+dn: cn=horizon-platform-admins,ou=groups,dc=horizonrelevance,dc=local
+objectClass: groupOfNames
+cn: horizon-platform-admins
+member: uid=migration-admin,ou=users,dc=horizonrelevance,dc=local
+
+dn: cn=horizon-migration-architects,ou=groups,dc=horizonrelevance,dc=local
+objectClass: groupOfNames
+cn: horizon-migration-architects
+member: uid=migration-architect,ou=users,dc=horizonrelevance,dc=local
+
+dn: cn=horizon-migration-operators,ou=groups,dc=horizonrelevance,dc=local
+objectClass: groupOfNames
+cn: horizon-migration-operators
+member: uid=migration-operator,ou=users,dc=horizonrelevance,dc=local
+
+dn: cn=horizon-migration-approvers,ou=groups,dc=horizonrelevance,dc=local
+objectClass: groupOfNames
+cn: horizon-migration-approvers
+member: uid=migration-approver,ou=users,dc=horizonrelevance,dc=local
+
+dn: cn=horizon-migration-auditors,ou=groups,dc=horizonrelevance,dc=local
+objectClass: groupOfNames
+cn: horizon-migration-auditors
+member: uid=migration-auditor,ou=users,dc=horizonrelevance,dc=local

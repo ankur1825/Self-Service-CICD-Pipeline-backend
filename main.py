@@ -397,8 +397,12 @@ pipeline {{
 """
 
 # GitHub webhook secret
-GITHUB_WEBHOOK_SECRET = os.environ["GITHUB_WEBHOOK_SECRET"]
-SESSION_SIGNING_SECRET = os.getenv("BACKEND_SESSION_SECRET", GITHUB_WEBHOOK_SECRET)
+GITHUB_WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "").strip()
+SESSION_SIGNING_SECRET = os.getenv("BACKEND_SESSION_SECRET", "").strip() or GITHUB_WEBHOOK_SECRET
+if RBAC_ENFORCEMENT_ENABLED and not SESSION_SIGNING_SECRET:
+    raise RuntimeError("BACKEND_SESSION_SECRET is required when backend RBAC enforcement is enabled.")
+if not SESSION_SIGNING_SECRET:
+    SESSION_SIGNING_SECRET = "rbac-disabled-local-session"
 
 def aws_account_id_from_registry(registry: Optional[str]) -> Optional[str]:
     if not registry:
@@ -444,6 +448,25 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+@app.get("/health/live", include_in_schema=False)
+def health_live():
+    return {"status": "live", "service": "horizon-platform-backend"}
+
+
+@app.get("/health/ready", include_in_schema=False)
+def health_ready():
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+        return {"status": "ready", "database": engine.dialect.name}
+    except Exception as exc:
+        logger.warning("Readiness database check failed: %s", exc)
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"status": "not_ready", "database": engine.dialect.name},
+        )
 
 class PipelineRequest(BaseModel):
     project_name: str
@@ -3275,6 +3298,8 @@ def upload_vulnerabilities(payload: UploadPayload, db: Session = Depends(get_db)
         return JSONResponse(status_code=500, content={"error": "Failed to upload vulnerabilities"})  
 
 def verify_github_signature(payload_body: bytes, signature_header: str) -> bool:
+    if not GITHUB_WEBHOOK_SECRET:
+        return False
     expected_signature = "sha256=" + hmac.new(
         GITHUB_WEBHOOK_SECRET.encode(), msg=payload_body, digestmod=hashlib.sha256
     ).hexdigest()
@@ -3287,6 +3312,8 @@ async def github_webhook(
     db: Session = Depends(get_db)
 ):
     try:
+        if not GITHUB_WEBHOOK_SECRET:
+            return JSONResponse(status_code=503, content={"error": "GitHub webhook integration is disabled"})
         body = await request.body()
 
         if not x_hub_signature_256:

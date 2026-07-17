@@ -1,0 +1,115 @@
+namespaceOverride: horizon-cloud-migration-dev
+fullnameOverride: horizon-cloud-migration-backend
+
+image:
+  repository: 426946630837.dkr.ecr.us-east-1.amazonaws.com/horizon/backend
+  tag: REPLACE_WITH_BACKEND_COMMIT_SHA
+  pullPolicy: IfNotPresent
+
+serviceAccount:
+  create: true
+  name: horizon-cloud-migration-backend
+  automount: false
+  annotations: {}
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    nginx.ingress.kubernetes.io/use-regex: "true"
+  hosts:
+    - host: cloud-migration-dev.horizonrelevance.com
+      paths:
+        - path: /pipeline/api(/|$)(.*)
+          pathType: ImplementationSpecific
+
+jenkins:
+  enabled: false
+
+githubWebhookSecret:
+  name: ""
+
+ldap:
+  server: ldap://openldap.horizon-relevance-dev.svc.cluster.local:389
+  bindDN: cn=admin,dc=horizonrelevance,dc=local
+  baseDN: ou=users,dc=horizonrelevance,dc=local
+  groupBaseDN: ou=groups,dc=horizonrelevance,dc=local
+  managerPasswordSecret:
+    name: cloud-migration-ldap-bind
+    key: password
+  roleGroupMappings:
+    platform-admin:
+      - horizon-platform-admins
+    migration-architect:
+      - horizon-migration-architects
+    migration-operator:
+      - horizon-migration-operators
+    migration-approver:
+      - horizon-migration-approvers
+    migration-auditor:
+      - horizon-migration-auditors
+
+database:
+  existingSecret: cloud-migration-database
+  key: DATABASE_URL
+
+auth:
+  rbacEnforcementEnabled: true
+  sessionTtlSeconds: "43200"
+  sessionSecret:
+    existingSecret: cloud-migration-runtime
+    key: BACKEND_SESSION_SECRET
+
+cloudMigration:
+  enabled: true
+  dataBoundary: client-hosted
+  allowSelfApproval: false
+  aws:
+    enabled: true
+    executionEnabled: false
+
+enterprise:
+  licenseEnforcementEnabled: true
+  licenseMode: offline-file
+  licenseUsageReportingEnabled: false
+  licenseAutoSyncEnabled: false
+  licenseSignatureVerificationRequired: true
+  installationId: cloud-migration-dev-eks
+  licenseDocumentSecret:
+    existingSecret: cloud-migration-license
+    key: license.json
+    mountPath: /app/license/license.json
+  signingSecret:
+    existingSecret: cloud-migration-runtime
+    key: ENTERPRISE_LICENSE_SIGNING_SECRET
+
+environmentCatalog:
+  enabled: true
+  environments:
+    - name: DEV
+      display_name: Cloud Migration Sandbox
+      account_tier: nonprod
+      aws_account_id: "111122223333"
+      aws_region: us-east-1
+      client_aws_role_arn: arn:aws:iam::111122223333:role/HorizonCloudMigrationSandboxRole
+      source_aws_role_arn: arn:aws:iam::111122223333:role/HorizonCloudMigrationSandboxRole
+      target_aws_role_arn: arn:aws:iam::111122223333:role/HorizonCloudMigrationSandboxRole
+      namespace_strategy: auto
+      namespace_template: "{client_id}-{project_name}-{env}"
+      iam_validation_mode: validation-only
+      eks_access_mode: namespace-scoped
+      is_active: true
+
+persistence:
+  enabled: false
+  fixPermissionsInitContainer:
+    enabled: false
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi

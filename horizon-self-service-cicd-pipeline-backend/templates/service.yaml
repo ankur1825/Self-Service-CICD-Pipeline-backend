@@ -3,6 +3,8 @@ kind: Service
 metadata:
   name: {{ include "horizon-self-service-cicd-pipeline-backend.fullname" . }}
   namespace: {{ .Values.namespaceOverride }}
+  labels:
+    {{- include "horizon-self-service-cicd-pipeline-backend.labels" . | nindent 4 }}
 spec:
   selector:
     app: {{ include "horizon-self-service-cicd-pipeline-backend.fullname" . }}

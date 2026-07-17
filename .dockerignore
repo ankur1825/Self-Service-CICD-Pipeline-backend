@@ -5,6 +5,7 @@ __pycache__
 .containerignore
 .env
 .env.*
+.local
 *.db
 *.sqlite
 *.sqlite3

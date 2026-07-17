@@ -1,4 +1,4 @@
-#fullnameOverride: horizon-self-service-cicd-pipeline-backend
+fullnameOverride: ""
 namespaceOverride: horizon-relevance-dev
 replicaCount: 1
 
@@ -51,7 +51,9 @@ ldap:
 
 serviceAccount:
   create: false
-  name: ""   
+  name: ""
+  automount: false
+  annotations: {}
 
 ingress:
   enabled: true
@@ -73,6 +75,7 @@ ingress:
 #  name: horizon-self-service-cicd-pipeline-backend 
 
 jenkins:
+  enabled: true
   user: ankur.kashyap
   token: replace-with-jenkins-api-token
   existingSecret: ""
@@ -81,6 +84,10 @@ jenkins:
   runtimeRoleArn: "arn:aws:iam::426946630837:role/HorizonJenkinsRuntimeRole"
   #user: sg1917459
   #token: 113232cbe431bdfa47ef491bbb07c5b93c        
+
+githubWebhookSecret:
+  name: github-webhook-secret
+  key: GITHUB_WEBHOOK_SECRET
 
 environmentPreflight:
   enforce: false
@@ -251,9 +258,37 @@ resources:
     cpu: 500m
     memory: 512Mi
 
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  fsGroupChangePolicy: OnRootMismatch
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+probes:
+  liveness:
+    path: /health/live
+    initialDelaySeconds: 15
+    periodSeconds: 20
+  readiness:
+    path: /health/ready
+    initialDelaySeconds: 5
+    periodSeconds: 10
+
 persistence:
   enabled: true
   storageClass: gp3
   accessMode: ReadWriteOnce
   size: 10Gi  
   mountPath: /app/data  # where SQLite DB will be saved
+  fixPermissionsInitContainer:
+    enabled: true
