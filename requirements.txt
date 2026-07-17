@@ -6,4 +6,4 @@ requests
 cryptography
 ldap3
 sqlalchemy
-sqlalchemy.orm
+psycopg[binary]

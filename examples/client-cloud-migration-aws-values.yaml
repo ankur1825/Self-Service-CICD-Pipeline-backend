@@ -1,0 +1,40 @@
+# Overlay for an AWS-enabled client installation. Keep license documents,
+# database URLs, and cloud credentials in client-owned Kubernetes Secrets.
+cloudMigration:
+  enabled: true
+  dataBoundary: client-hosted
+  allowSelfApproval: false
+  aws:
+    enabled: true
+    executionEnabled: false
+
+database:
+  existingSecret: horizon-platform-database
+  key: DATABASE_URL
+
+enterprise:
+  licenseEnforcementEnabled: true
+  licenseMode: offline-file
+  licenseDocumentSecret:
+    existingSecret: horizon-cloud-migration-license
+    key: license.json
+    mountPath: /app/license/license.json
+  licenseSignatureVerificationRequired: true
+  publicKeySecret:
+    existingSecret: horizon-license-public-key
+    key: public-key.pem
+  # The signed license document—not editable Helm values—is authoritative for
+  # pipeline, feature, environment, account, and installation entitlements.
+
+ldap:
+  roleGroupMappings:
+    platform-admin:
+      - client-platform-admins
+    migration-architect:
+      - client-migration-architects
+    migration-operator:
+      - client-migration-operators
+    migration-approver:
+      - client-migration-approvers
+    migration-auditor:
+      - client-migration-auditors

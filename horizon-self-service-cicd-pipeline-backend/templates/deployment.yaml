@@ -35,6 +35,26 @@ spec:
           env:
             - name: DB_PATH
               value: /app/data
+            {{- if .Values.database.existingSecret }}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret | quote }}
+                  key: {{ .Values.database.key | default "DATABASE_URL" | quote }}
+            {{- else if .Values.database.url }}
+            - name: DATABASE_URL
+              value: {{ .Values.database.url | quote }}
+            {{- end }}
+            - name: CLOUD_MIGRATION_ENABLED
+              value: {{ .Values.cloudMigration.enabled | quote }}
+            - name: CLOUD_MIGRATION_DATA_BOUNDARY
+              value: {{ .Values.cloudMigration.dataBoundary | default "client-hosted" | quote }}
+            - name: CLOUD_MIGRATION_ALLOW_SELF_APPROVAL
+              value: {{ .Values.cloudMigration.allowSelfApproval | quote }}
+            - name: CLOUD_MIGRATION_AWS_ENABLED
+              value: {{ .Values.cloudMigration.aws.enabled | quote }}
+            - name: CLOUD_MIGRATION_AWS_EXECUTION_ENABLED
+              value: {{ .Values.cloudMigration.aws.executionEnabled | quote }}
             - name: JENKINS_URL
               value: {{ .Values.jenkins.url | default "https://horizonrelevance.com/jenkins" | quote }}
             - name: JENKINS_USER
@@ -148,7 +168,7 @@ spec:
             - name: ENTERPRISE_MAX_USERS
               value: {{ .Values.enterprise.maxUsers | quote }}
             - name: ENTERPRISE_LICENSE_FILE
-              value: {{ .Values.enterprise.licenseFile | quote }}
+              value: {{ ternary .Values.enterprise.licenseDocumentSecret.mountPath .Values.enterprise.licenseFile (ne .Values.enterprise.licenseDocumentSecret.existingSecret "") | quote }}
             - name: ENTERPRISE_LICENSE_MODE
               value: {{ .Values.enterprise.licenseMode | quote }}
             - name: ENTERPRISE_LICENSE_SYNC_ENDPOINT
@@ -213,6 +233,12 @@ spec:
               mountPath: /app/config
               readOnly: true
             {{- end }}
+            {{- if .Values.enterprise.licenseDocumentSecret.existingSecret }}
+            - name: enterprise-license-document
+              mountPath: {{ .Values.enterprise.licenseDocumentSecret.mountPath | quote }}
+              subPath: {{ .Values.enterprise.licenseDocumentSecret.key | quote }}
+              readOnly: true
+            {{- end }}
       volumes:
         - name: app-data
           persistentVolumeClaim:
@@ -221,4 +247,12 @@ spec:
         - name: environment-catalog
           configMap:
             name: {{ include "horizon-self-service-cicd-pipeline-backend.fullname" . }}-environment-catalog
+        {{- end }}
+        {{- if .Values.enterprise.licenseDocumentSecret.existingSecret }}
+        - name: enterprise-license-document
+          secret:
+            secretName: {{ .Values.enterprise.licenseDocumentSecret.existingSecret | quote }}
+            items:
+              - key: {{ .Values.enterprise.licenseDocumentSecret.key | quote }}
+                path: {{ .Values.enterprise.licenseDocumentSecret.key | quote }}
         {{- end }}
