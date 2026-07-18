@@ -55,6 +55,13 @@ database:
   key: DATABASE_URL
   migrations:
     enabled: true
+    resources:
+      requests:
+        cpu: 1m
+        memory: 64Mi
+      limits:
+        cpu: 100m
+        memory: 256Mi
 
 auth:
   rbacEnforcementEnabled: true
