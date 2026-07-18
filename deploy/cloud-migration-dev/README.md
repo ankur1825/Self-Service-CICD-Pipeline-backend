@@ -2,6 +2,8 @@
 
 For the client-hosted AWS worker, IAM model, safety locks, and execution API, see
 [`../../docs/cloud-migration-client-hosted-worker.md`](../../docs/cloud-migration-client-hosted-worker.md).
+For the development-only end-to-end simulator and its acceptance gates, see
+[`../../docs/cloud-migration-mock-acceptance.md`](../../docs/cloud-migration-mock-acceptance.md).
 
 This overlay deploys the feature-branch control plane without changing `horizon-relevance-dev`. AWS execution, license sync, usage reporting, Jenkins integration, and self-approval are disabled.
 
@@ -92,4 +94,8 @@ kubectl rollout status deployment/horizon-cloud-migration-backend -n horizon-clo
 
 Record both commit SHAs, image digests, rendered Helm values, test evidence, and approver identity for the release evidence bundle.
 
-Do not set `cloudMigration.aws.executionEnabled=true`; the client-hosted execution worker is a later gated phase.
+The checked-in development values deliberately enable execution only with
+`worker.executionMode=mock` and `worker.mockExecutionEnabled=true`. This worker has
+no AWS service-account token or AWS egress. Do not use these values for production,
+and do not change to `executionMode=aws` until the real-AWS acceptance gate in the
+mock acceptance runbook is approved.

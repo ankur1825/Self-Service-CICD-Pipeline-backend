@@ -20,10 +20,13 @@ from ..models import (
     MigrationAuditEvent,
     MigrationEvidenceArtifact,
     MigrationExecutionJob,
+    MigrationWorkerHeartbeat,
     MigrationWave,
 )
-from ..service import _environment, validate_module_license
+from ..service import _client_id, _environment, validate_module_license
 from .aws import AwsExecutionAdapter, AwsExecutionError
+from .mock_aws import MockAwsExecutionAdapter
+from .mode import MOCK_EXECUTION_MODE, validate_execution_mode
 
 
 logger = logging.getLogger("cloud_migration.execution.worker")
@@ -41,6 +44,28 @@ def _env_int(name: str, default: int, minimum: int, maximum: int) -> int:
 def _worker_id() -> str:
     configured = os.getenv("CLOUD_MIGRATION_WORKER_ID", "").strip()
     return configured or f"{socket.gethostname()}-{os.getpid()}"
+
+
+def record_heartbeat(db: Session, worker_id: str, mode: str) -> None:
+    now = datetime.utcnow()
+    client_id = _client_id()
+    heartbeat = db.query(MigrationWorkerHeartbeat).filter_by(worker_id=worker_id).first()
+    if not heartbeat:
+        heartbeat = MigrationWorkerHeartbeat(
+            worker_id=worker_id,
+            client_id=client_id,
+            execution_mode=mode,
+            status="RUNNING",
+            started_at=now,
+            last_seen_at=now,
+        )
+        db.add(heartbeat)
+    else:
+        heartbeat.client_id = client_id
+        heartbeat.execution_mode = mode
+        heartbeat.status = "RUNNING"
+        heartbeat.last_seen_at = now
+    db.commit()
 
 
 def _handle_signal(signum: int, _frame: Any) -> None:
@@ -257,10 +282,16 @@ def execute_claimed_job(
     db: Session,
     job: MigrationExecutionJob,
     worker_id: str,
-    adapter: AwsExecutionAdapter,
+    adapter: Any,
 ) -> Dict[str, Any]:
     wave, environment = _validate_job(db, job)
     request = _json_load(job.request_json)
+    if getattr(adapter, "mock", False):
+        request["_mock_servers"] = []
+        for workload in wave.workloads:
+            metadata = _json_load(workload.metadata_json)
+            observed = metadata.get("aws_mgn") or {}
+            request["_mock_servers"].append({"source_ref": workload.source_ref, **observed})
     role_arn = environment.target_aws_role_arn or environment.client_aws_role_arn or ""
     result = adapter.execute(
         action=job.action,
@@ -272,9 +303,9 @@ def execute_claimed_job(
         source_refs=[item.source_ref for item in wave.workloads],
         request=request,
     )
-    if job.action == "RECONCILE":
+    if job.action == "RECONCILE" or getattr(adapter, "mock", False):
         _apply_reconciliation(wave, result)
-    elif job.action == "FINALIZE_CUTOVER":
+    if job.action == "FINALIZE_CUTOVER":
         wave.status = "FINALIZED"
 
     job.status = "SUCCEEDED"
@@ -330,9 +361,14 @@ def fail_claimed_job(db: Session, job: MigrationExecutionJob, worker_id: str, ex
     db.commit()
 
 
-def run_once(worker_id: str, adapter: AwsExecutionAdapter) -> bool:
+def run_once(worker_id: str, adapter: Any, mode: Optional[str] = None) -> bool:
     db = SessionLocal()
     try:
+        record_heartbeat(
+            db,
+            worker_id,
+            mode or (MOCK_EXECUTION_MODE if getattr(adapter, "mock", False) else "aws"),
+        )
         job = claim_next_job(db, worker_id)
         if not job:
             return False
@@ -359,14 +395,15 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
     worker_id = _worker_id()
-    adapter = AwsExecutionAdapter()
+    mode = validate_execution_mode()
+    adapter = MockAwsExecutionAdapter() if mode == MOCK_EXECUTION_MODE else AwsExecutionAdapter()
     polling_seconds = _env_int("CLOUD_MIGRATION_WORKER_POLL_SECONDS", 5, 1, 60)
-    logger.info("Cloud Migration Factory worker started id=%s", worker_id)
+    logger.info("Cloud Migration Factory worker started id=%s execution_mode=%s", worker_id, mode)
     if arguments.once:
-        run_once(worker_id, adapter)
+        run_once(worker_id, adapter, mode)
         return
     while not STOP_REQUESTED:
-        if not run_once(worker_id, adapter):
+        if not run_once(worker_id, adapter, mode):
             time.sleep(polling_seconds)
     logger.info("Cloud Migration Factory worker stopped id=%s", worker_id)
 

@@ -91,6 +91,12 @@ spec:
               value: {{ .Values.cloudMigration.aws.finalizationEnabled | default false | quote }}
             - name: CLOUD_MIGRATION_WORKER_ENABLED
               value: {{ .Values.cloudMigration.worker.enabled | default false | quote }}
+            - name: CLOUD_MIGRATION_EXECUTION_MODE
+              value: {{ .Values.cloudMigration.worker.executionMode | default "aws" | quote }}
+            - name: CLOUD_MIGRATION_MOCK_EXECUTION_ENABLED
+              value: {{ .Values.cloudMigration.worker.mockExecutionEnabled | default false | quote }}
+            - name: CLOUD_MIGRATION_MAX_ACTIVE_JOBS
+              value: {{ .Values.cloudMigration.worker.maxActiveJobs | default 100 | quote }}
             {{- if .Values.jenkins.enabled }}
             - name: JENKINS_URL
               value: {{ .Values.jenkins.url | default "https://horizonrelevance.com/jenkins" | quote }}

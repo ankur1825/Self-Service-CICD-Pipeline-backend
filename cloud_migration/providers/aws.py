@@ -3,6 +3,7 @@ import re
 from typing import Any, Dict, Iterable, List
 
 from .base import MigrationProviderAdapter
+from ..execution.mode import execution_mode, mock_execution_enabled
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -17,6 +18,7 @@ class AwsMigrationAdapter(MigrationProviderAdapter):
     adapter_version = "v1alpha1"
 
     def capabilities(self) -> Dict[str, Any]:
+        mode = execution_mode()
         return {
             "provider": self.provider,
             "display_name": "Amazon Web Services",
@@ -49,6 +51,9 @@ class AwsMigrationAdapter(MigrationProviderAdapter):
             "execution_enabled": _env_bool("CLOUD_MIGRATION_AWS_EXECUTION_ENABLED", False),
             "execution_worker": {
                 "configured": _env_bool("CLOUD_MIGRATION_WORKER_ENABLED", False),
+                "mode": mode,
+                "mock": mode == "mock",
+                "mock_execution_enabled": mock_execution_enabled(),
                 "read_only_actions": ["PREFLIGHT", "RECONCILE"],
                 "mutating_actions_require_separate_approval": True,
                 "finalization_enabled": _env_bool("CLOUD_MIGRATION_FINALIZATION_ENABLED", False),

@@ -10,7 +10,8 @@ from fastapi import HTTPException, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from .models import MigrationEvidenceArtifact, MigrationExecutionJob
+from .models import MigrationEvidenceArtifact, MigrationExecutionJob, MigrationWorkerHeartbeat
+from .execution.mode import MOCK_EXECUTION_MODE, execution_mode, mock_execution_enabled
 from .schemas import MigrationExecutionJobApprovalRequest, MigrationExecutionJobRequest
 from .service import (
     APPROVER_ROLES,
@@ -45,6 +46,14 @@ def _env_bool(name: str, default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError:
+        value = default
+    return max(minimum, min(maximum, value))
 
 
 def _json_load(value: str | None) -> Dict[str, Any]:
@@ -130,6 +139,11 @@ def _validate_action_gate(db: Session, job: MigrationExecutionJob) -> None:
             )
         if not _env_bool("CLOUD_MIGRATION_AWS_EXECUTION_ENABLED", False):
             raise HTTPException(status_code=409, detail="AWS migration execution is locked for this installation.")
+        if execution_mode() == MOCK_EXECUTION_MODE and not mock_execution_enabled():
+            raise HTTPException(
+                status_code=409,
+                detail="Mock execution is selected but its separate installation safety lock is closed.",
+            )
         if job.action == "FINALIZE_CUTOVER" and not _env_bool("CLOUD_MIGRATION_FINALIZATION_ENABLED", False):
             raise HTTPException(status_code=409, detail="Cutover finalization has a separate installation safety lock.")
 
@@ -174,6 +188,42 @@ def enqueue_execution_job(
         if existing.wave_id != wave.id or existing.action != action or (existing.request_json or "{}") != serialized:
             raise HTTPException(status_code=409, detail="Idempotency-Key is already associated with a different request.")
         return _job_with_evidence(db, existing)
+
+    active_statuses = ["AWAITING_APPROVAL", "QUEUED", "RUNNING"]
+    active_count = (
+        db.query(MigrationExecutionJob)
+        .filter(
+            MigrationExecutionJob.client_id == client_id,
+            MigrationExecutionJob.status.in_(active_statuses),
+        )
+        .count()
+    )
+    max_active = _env_int("CLOUD_MIGRATION_MAX_ACTIVE_JOBS", 100, 1, 10000)
+    if active_count >= max_active:
+        raise HTTPException(
+            status_code=429,
+            detail=f"The tenant already has the configured maximum of {max_active} active execution jobs.",
+        )
+    if action in MUTATING_ACTIONS:
+        active_mutation = (
+            db.query(MigrationExecutionJob)
+            .filter(
+                MigrationExecutionJob.client_id == client_id,
+                MigrationExecutionJob.wave_id == wave.id,
+                MigrationExecutionJob.action.in_(MUTATING_ACTIONS),
+                MigrationExecutionJob.status.in_(active_statuses),
+            )
+            .order_by(MigrationExecutionJob.created_at.asc())
+            .first()
+        )
+        if active_mutation:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Wave mutation {active_mutation.action} is already {active_mutation.status}. "
+                    "Complete it before requesting another lifecycle change."
+                ),
+            )
 
     job = MigrationExecutionJob(
         id=str(uuid.uuid4()),
@@ -229,6 +279,58 @@ def get_execution_job(db: Session, principal: Any, job_id: str) -> Dict[str, Any
     require_migration_role(principal, READ_ROLES, "Viewing a migration execution job")
     validate_module_license()
     return _job_with_evidence(db, _job(db, job_id, _client_id()))
+
+
+def execution_health(db: Session, principal: Any) -> Dict[str, Any]:
+    require_migration_role(principal, READ_ROLES, "Viewing migration worker health")
+    validate_module_license()
+    client_id = _client_id()
+    jobs = db.query(MigrationExecutionJob).filter_by(client_id=client_id).all()
+    counts: Dict[str, int] = {}
+    for job in jobs:
+        counts[job.status] = counts.get(job.status, 0) + 1
+    now = datetime.utcnow()
+    expired_leases = sum(
+        1
+        for job in jobs
+        if job.status == "RUNNING" and job.lease_expires_at and job.lease_expires_at < now
+    )
+    queued = [job for job in jobs if job.status == "QUEUED"]
+    oldest_queued_at = min((job.created_at for job in queued), default=None)
+    configured = _env_bool("CLOUD_MIGRATION_WORKER_ENABLED", False)
+    mode = execution_mode()
+    mock_unlocked = mock_execution_enabled()
+    heartbeat_timeout = _env_int("CLOUD_MIGRATION_WORKER_HEARTBEAT_TIMEOUT_SECONDS", 30, 5, 3600)
+    heartbeat_cutoff = now.timestamp() - heartbeat_timeout
+    heartbeats = (
+        db.query(MigrationWorkerHeartbeat)
+        .filter_by(client_id=client_id)
+        .order_by(MigrationWorkerHeartbeat.last_seen_at.desc())
+        .all()
+    )
+    live_workers = [item for item in heartbeats if item.last_seen_at.timestamp() >= heartbeat_cutoff]
+    healthy = (
+        configured
+        and bool(live_workers)
+        and expired_leases == 0
+        and (mode != MOCK_EXECUTION_MODE or mock_unlocked)
+    )
+    return {
+        "status": "healthy" if healthy else "attention",
+        "worker_configured": configured,
+        "execution_mode": mode,
+        "mock_execution_enabled": mock_unlocked,
+        "execution_enabled": _env_bool("CLOUD_MIGRATION_AWS_EXECUTION_ENABLED", False),
+        "finalization_enabled": _env_bool("CLOUD_MIGRATION_FINALIZATION_ENABLED", False),
+        "counts": counts,
+        "active_job_count": sum(counts.get(item, 0) for item in ("AWAITING_APPROVAL", "QUEUED", "RUNNING")),
+        "expired_lease_count": expired_leases,
+        "live_worker_count": len(live_workers),
+        "last_heartbeat_at": heartbeats[0].last_seen_at if heartbeats else None,
+        "heartbeat_timeout_seconds": heartbeat_timeout,
+        "oldest_queued_at": oldest_queued_at,
+        "checked_at": now,
+    }
 
 
 def get_execution_evidence(db: Session, principal: Any, evidence_id: str) -> Dict[str, Any]:

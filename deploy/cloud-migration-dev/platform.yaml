@@ -243,6 +243,25 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
+  name: allow-worker
+  namespace: horizon-cloud-migration-dev
+spec:
+  podSelector:
+    matchLabels:
+      app: horizon-cloud-migration-backend-worker
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: cloud-migration-postgresql
+      ports:
+        - protocol: TCP
+          port: 5432
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
   name: allow-postgresql-from-backend
   namespace: horizon-cloud-migration-dev
 spec:
@@ -255,6 +274,9 @@ spec:
         - podSelector:
             matchLabels:
               app: horizon-cloud-migration-backend
+        - podSelector:
+            matchLabels:
+              app: horizon-cloud-migration-backend-worker
       ports:
         - protocol: TCP
           port: 5432

@@ -10,10 +10,12 @@ from sqlalchemy.orm import sessionmaker
 from cloud_migration.providers.aws import AwsMigrationAdapter
 from cloud_migration.adapters import adapter_registry
 from cloud_migration.execution.aws import AwsExecutionAdapter, AwsExecutionError
-from cloud_migration.execution.worker import claim_next_job, execute_claimed_job
+from cloud_migration.execution.mock_aws import MockAwsExecutionAdapter
+from cloud_migration.execution.worker import claim_next_job, execute_claimed_job, record_heartbeat
 from cloud_migration.execution_service import (
     approve_execution_job,
     enqueue_execution_job,
+    execution_health,
 )
 from cloud_migration.models import MigrationEvidenceArtifact, MigrationExecutionJob, MigrationWave
 from cloud_migration.schemas import (
@@ -74,6 +76,8 @@ class AwsAdapterTest(unittest.TestCase):
             "CLOUD_MIGRATION_ENABLED": "true",
             "ENTERPRISE_LICENSE_ENFORCEMENT_ENABLED": "true",
             "ENTERPRISE_LICENSE_SIGNATURE_VERIFICATION_REQUIRED": "false",
+            "ENTERPRISE_LICENSE_FILE": "",
+            "ENTERPRISE_LICENSE_CACHE_FILE": "/tmp/horizon-unit-test-no-license-cache.json",
             "ENTERPRISE_ENABLED_PIPELINES": "Build & Deploy Pipeline",
             "ENTERPRISE_ENABLED_FEATURES": "cloud_migration,cloud_migration_aws",
             "ENTERPRISE_LICENSE_EXPIRES_AT": "2099-12-31T23:59:59Z",
@@ -91,7 +95,13 @@ class MigrationWorkflowTest(unittest.TestCase):
         os.environ["CLOUD_MIGRATION_ENABLED"] = "true"
         os.environ["CLOUD_MIGRATION_AWS_ENABLED"] = "true"
         os.environ["CLOUD_MIGRATION_AWS_EXECUTION_ENABLED"] = "false"
+        os.environ["CLOUD_MIGRATION_EXECUTION_MODE"] = "aws"
+        os.environ["CLOUD_MIGRATION_MOCK_EXECUTION_ENABLED"] = "false"
+        os.environ["CLOUD_MIGRATION_WORKER_ENABLED"] = "false"
+        os.environ["CLOUD_MIGRATION_FINALIZATION_ENABLED"] = "false"
         os.environ["ENTERPRISE_LICENSE_ENFORCEMENT_ENABLED"] = "false"
+        os.environ["ENTERPRISE_LICENSE_FILE"] = ""
+        os.environ["ENTERPRISE_LICENSE_CACHE_FILE"] = "/tmp/horizon-unit-test-no-license-cache.json"
         self.engine = create_engine("sqlite:///:memory:")
         Base.metadata.create_all(self.engine)
         self.session = sessionmaker(bind=self.engine)()
@@ -128,6 +138,7 @@ class MigrationWorkflowTest(unittest.TestCase):
         self.assertIn("cloud_migration_transfer_profiles", inspector.get_table_names())
         self.assertIn("cloud_migration_execution_jobs", inspector.get_table_names())
         self.assertIn("cloud_migration_evidence_artifacts", inspector.get_table_names())
+        self.assertIn("cloud_migration_worker_heartbeats", inspector.get_table_names())
         project_columns = {column["name"] for column in inspector.get_columns("cloud_migration_projects")}
         wave_columns = {column["name"] for column in inspector.get_columns("cloud_migration_waves")}
         self.assertTrue({"source_endpoint_id", "target_endpoint_id"}.issubset(project_columns))
@@ -220,6 +231,8 @@ class MigrationWorkflowTest(unittest.TestCase):
             "CLOUD_MIGRATION_DRUVA_ENABLED": "true",
             "ENTERPRISE_LICENSE_ENFORCEMENT_ENABLED": "true",
             "ENTERPRISE_LICENSE_SIGNATURE_VERIFICATION_REQUIRED": "false",
+            "ENTERPRISE_LICENSE_FILE": "",
+            "ENTERPRISE_LICENSE_CACHE_FILE": "/tmp/horizon-unit-test-no-license-cache.json",
             "ENTERPRISE_CLIENT_ID": "client-a",
             "ENTERPRISE_LICENSE_KEY": "test-license",
             "ENTERPRISE_LICENSE_EXPIRES_AT": "2099-12-31T23:59:59Z",
@@ -385,6 +398,115 @@ class MigrationWorkflowTest(unittest.TestCase):
                 "start-test:after-reconcile:0001",
             )
         self.assertEqual(mutation["status"], "AWAITING_APPROVAL")
+
+    def _run_mock_action(self, wave, action_name, sequence):
+        requested = enqueue_execution_job(
+            self.session,
+            self.author,
+            wave["id"],
+            action_name,
+            MigrationExecutionJobRequest(),
+            f"mock:{action_name}:{sequence:04d}",
+        )
+        if requested["status"] == "AWAITING_APPROVAL":
+            requested = approve_execution_job(
+                self.session,
+                self.approver,
+                requested["id"],
+                MigrationExecutionJobApprovalRequest(
+                    expected_version=requested["version"],
+                    confirmation=f"{requested['action']} {wave['id']}",
+                    comment=f"MOCK-CAB-{sequence:04d}",
+                ),
+            )
+        claimed = claim_next_job(self.session, "mock-unit-worker")
+        self.assertEqual(claimed.id, requested["id"])
+        execute_claimed_job(
+            self.session,
+            claimed,
+            "mock-unit-worker",
+            MockAwsExecutionAdapter(),
+        )
+        return self.session.query(MigrationExecutionJob).filter_by(id=requested["id"]).one()
+
+    def test_mock_worker_runs_approved_test_cutover_and_finalization_lifecycle(self):
+        wave = self._create_approved_wave("Mock complete lifecycle")
+        mock_environment = {
+            "CLOUD_MIGRATION_AWS_EXECUTION_ENABLED": "true",
+            "CLOUD_MIGRATION_EXECUTION_MODE": "mock",
+            "CLOUD_MIGRATION_MOCK_EXECUTION_ENABLED": "true",
+            "CLOUD_MIGRATION_FINALIZATION_ENABLED": "true",
+            "CLOUD_MIGRATION_WORKER_ENABLED": "true",
+        }
+        with patch.dict(os.environ, mock_environment, clear=False):
+            for sequence, action in enumerate(
+                [
+                    "preflight",
+                    "reconcile",
+                    "start-test",
+                    "finalize-test",
+                    "start-cutover",
+                    "finalize-cutover",
+                ],
+                start=1,
+            ):
+                completed = self._run_mock_action(wave, action, sequence)
+                self.assertEqual(completed.status, "SUCCEEDED")
+                self.assertTrue(completed.result_json)
+
+            completed_wave = self.session.query(MigrationWave).filter_by(id=wave["id"]).one()
+            self.assertEqual(completed_wave.status, "FINALIZED")
+            self.assertEqual(completed_wave.workloads[0].status, "CUTOVER_COMPLETE")
+            evidence = (
+                self.session.query(MigrationEvidenceArtifact)
+                .join(MigrationExecutionJob, MigrationEvidenceArtifact.job_id == MigrationExecutionJob.id)
+                .filter(MigrationExecutionJob.wave_id == wave["id"])
+                .all()
+            )
+            self.assertEqual(len(evidence), 6)
+            self.assertTrue(all(len(item.content_sha256) == 64 for item in evidence))
+            record_heartbeat(self.session, "mock-unit-worker", "mock")
+            health = execution_health(self.session, self.author)
+            self.assertEqual(health["execution_mode"], "mock")
+            self.assertEqual(health["status"], "healthy")
+
+    def test_mock_worker_can_rollback_a_test_launch(self):
+        wave = self._create_approved_wave("Mock rollback lifecycle")
+        mock_environment = {
+            "CLOUD_MIGRATION_AWS_EXECUTION_ENABLED": "true",
+            "CLOUD_MIGRATION_EXECUTION_MODE": "mock",
+            "CLOUD_MIGRATION_MOCK_EXECUTION_ENABLED": "true",
+        }
+        with patch.dict(os.environ, mock_environment, clear=False):
+            self._run_mock_action(wave, "reconcile", 101)
+            self._run_mock_action(wave, "start-test", 102)
+            self._run_mock_action(wave, "rollback", 103)
+
+        rolled_back = self.session.query(MigrationWave).filter_by(id=wave["id"]).one()
+        self.assertEqual(rolled_back.status, "TEST_READY")
+        self.assertEqual(rolled_back.workloads[0].status, "TEST_READY")
+
+    def test_mock_mutation_requires_the_separate_mock_safety_lock(self):
+        wave = self._create_approved_wave("Mock safety lock")
+        with patch.dict(
+            os.environ,
+            {
+                "CLOUD_MIGRATION_AWS_EXECUTION_ENABLED": "true",
+                "CLOUD_MIGRATION_EXECUTION_MODE": "mock",
+                "CLOUD_MIGRATION_MOCK_EXECUTION_ENABLED": "false",
+            },
+            clear=False,
+        ):
+            with self.assertRaises(HTTPException) as locked:
+                enqueue_execution_job(
+                    self.session,
+                    self.author,
+                    wave["id"],
+                    "start-test",
+                    MigrationExecutionJobRequest(),
+                    "mock:safety:locked:0001",
+                )
+        self.assertEqual(locked.exception.status_code, 409)
 
 
 class AwsExecutionAdapterTest(unittest.TestCase):

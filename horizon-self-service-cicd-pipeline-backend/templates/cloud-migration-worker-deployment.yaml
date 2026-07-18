@@ -51,6 +51,12 @@ spec:
               value: {{ .Values.cloudMigration.worker.pollSeconds | quote }}
             - name: CLOUD_MIGRATION_WORKER_LEASE_SECONDS
               value: {{ .Values.cloudMigration.worker.leaseSeconds | quote }}
+            - name: CLOUD_MIGRATION_EXECUTION_MODE
+              value: {{ .Values.cloudMigration.worker.executionMode | default "aws" | quote }}
+            - name: CLOUD_MIGRATION_MOCK_EXECUTION_ENABLED
+              value: {{ .Values.cloudMigration.worker.mockExecutionEnabled | default false | quote }}
+            - name: CLOUD_MIGRATION_MAX_ACTIVE_JOBS
+              value: {{ .Values.cloudMigration.worker.maxActiveJobs | default 100 | quote }}
             - name: CLOUD_MIGRATION_NETWORK_VANTAGE
               value: {{ .Values.cloudMigration.worker.networkVantage | quote }}
             - name: CLOUD_MIGRATION_ENABLED

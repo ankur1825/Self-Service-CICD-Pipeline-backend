@@ -31,6 +31,8 @@ The first production increment supports:
 | Stale plans | A job will not run when its recorded plan version differs from the wave. |
 | MGN lifecycle | Each action verifies the observed AWS lifecycle before making an API call. |
 | Evidence | Success, retry, and terminal failure records are hashed and integrity-checked on read. |
+| Liveness | Each worker records a database heartbeat; health becomes attention when it is stale. |
+| Concurrency | A wave can have only one active mutation; tenant active-job count is bounded. |
 
 ## 1. Configure AWS identities
 
@@ -69,6 +71,8 @@ cloudMigration:
     finalizationEnabled: false
   worker:
     enabled: true
+    executionMode: aws
+    mockExecutionEnabled: false
     serviceAccount:
       annotations:
         eks.amazonaws.com/role-arn: arn:aws:iam::111122223333:role/horizon-cloud-migration-worker
@@ -79,6 +83,9 @@ cloudMigration:
 
 Run `alembic upgrade head` before starting the new API or worker image. The worker has no
 Ingress or Service and polls the client database for durable jobs.
+
+Use `GET /cloud-migration/execution/health` to verify a live heartbeat, queue depth,
+expired leases, execution mode, and installation locks before opening a change window.
 
 ## 4. Run preflight and reconciliation
 
@@ -165,7 +172,8 @@ client-owned artifacts into the client's evidence retention system after finaliz
 
 ## Development namespace status
 
-The `horizon-cloud-migration-dev` values intentionally leave the worker and both mutation
-locks disabled because the sample Environment Catalog contains placeholder target-account
-and role values. Configure a real sandbox account, IRSA role, target role, external ID,
-MGN initialization, and TCP 1500 targets before enabling the worker in that namespace.
+The `horizon-cloud-migration-dev` values run the worker in explicit `mock` mode for
+end-to-end acceptance. The pod has no service-account token and its NetworkPolicy allows
+only PostgreSQL egress, so it cannot call AWS. See `cloud-migration-mock-acceptance.md`.
+Configure a real sandbox account, IRSA role, target role, external ID, MGN initialization,
+and TCP 1500 targets in a separate values file before any `aws`-mode test.

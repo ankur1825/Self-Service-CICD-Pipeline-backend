@@ -137,6 +137,11 @@ cloudMigration:
     finalizationEnabled: false
   worker:
     enabled: false
+    # "aws" uses real STS/MGN APIs. "mock" is a deterministic simulator and
+    # also requires mockExecutionEnabled=true.
+    executionMode: aws
+    mockExecutionEnabled: false
+    maxActiveJobs: 100
     replicaCount: 1
     pollSeconds: 5
     leaseSeconds: 900

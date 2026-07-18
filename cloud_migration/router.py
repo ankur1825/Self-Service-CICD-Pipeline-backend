@@ -15,6 +15,7 @@ from .schemas import (
 from .execution_service import (
     approve_execution_job,
     enqueue_execution_job,
+    execution_health,
     get_execution_evidence,
     get_execution_job,
     list_execution_jobs,
@@ -123,6 +124,13 @@ def build_cloud_migration_router(
         principal: Any = Depends(principal_dependency),
     ):
         return {"jobs": list_execution_jobs(db, principal, wave_id, limit)}
+
+    @router.get("/execution/health")
+    def get_execution_health(
+        db: Session = Depends(db_dependency),
+        principal: Any = Depends(principal_dependency),
+    ):
+        return execution_health(db, principal)
 
     @router.post("/waves/{wave_id}/jobs/{action_name}", status_code=202)
     def post_wave_execution_job(

@@ -84,12 +84,24 @@ cloudMigration:
     enabled: false
   aws:
     enabled: true
-    executionEnabled: false
-    finalizationEnabled: false
+    # Development accepts the full approval/finalization workflow, but the
+    # worker below is hard-wired to the simulator and cannot call AWS.
+    executionEnabled: true
+    finalizationEnabled: true
   worker:
-    # Enable after a real client account, IRSA role, MGN initialization, and
-    # source-network TCP 1500 probe targets are configured.
-    enabled: false
+    enabled: true
+    executionMode: mock
+    mockExecutionEnabled: true
+    maxActiveJobs: 50
+    replicaCount: 1
+    pollSeconds: 2
+    leaseSeconds: 300
+    networkVantage: mock-client-worker
+    serviceAccount:
+      create: true
+      name: horizon-cloud-migration-backend-worker
+      automount: false
+      annotations: {}
     resources:
       requests:
         cpu: 1m

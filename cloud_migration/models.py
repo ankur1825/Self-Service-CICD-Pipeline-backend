@@ -231,3 +231,16 @@ class MigrationEvidenceArtifact(Base):
     content_sha256 = Column(String(64), nullable=False)
     payload_json = Column(Text, nullable=False)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+
+
+class MigrationWorkerHeartbeat(Base):
+    """Observed liveness for a client-hosted execution worker instance."""
+
+    __tablename__ = "cloud_migration_worker_heartbeats"
+
+    worker_id = Column(String(256), primary_key=True)
+    client_id = Column(String(128), nullable=False, index=True)
+    execution_mode = Column(String(16), nullable=False)
+    status = Column(String(32), nullable=False, default="RUNNING")
+    started_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    last_seen_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
