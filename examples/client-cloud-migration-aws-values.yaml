@@ -7,8 +7,20 @@ cloudMigration:
   aws:
     enabled: true
     executionEnabled: false
+    finalizationEnabled: false
+  worker:
+    # Turn on in read-only mode after PostgreSQL, IRSA, the target STS role,
+    # external ID, and source-network routing are configured.
+    enabled: false
+    serviceAccount:
+      annotations:
+        eks.amazonaws.com/role-arn: arn:aws:iam::111122223333:role/horizon-cloud-migration-worker
+    awsExternalIdSecret:
+      existingSecret: horizon-cloud-migration-aws-external-id
+      key: CLOUD_MIGRATION_AWS_EXTERNAL_ID
 
 database:
+  # PostgreSQL is required when the execution worker is enabled.
   existingSecret: horizon-platform-database
   key: DATABASE_URL
 

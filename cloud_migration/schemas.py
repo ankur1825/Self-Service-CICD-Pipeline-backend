@@ -13,6 +13,15 @@ SourceType = Literal[
     "oci-compute",
 ]
 MigrationMethod = Literal["mgn", "ami-copy", "druva"]
+ExecutionAction = Literal[
+    "preflight",
+    "reconcile",
+    "start-test",
+    "finalize-test",
+    "start-cutover",
+    "rollback",
+    "finalize-cutover",
+]
 
 
 class MigrationProjectCreate(BaseModel):
@@ -46,4 +55,16 @@ class MigrationWavePlanRequest(BaseModel):
 
 class MigrationWaveApprovalRequest(BaseModel):
     expected_version: Optional[int] = Field(default=None, ge=1)
+    comment: Optional[str] = Field(default=None, max_length=2000)
+
+
+class MigrationExecutionJobRequest(BaseModel):
+    tcp1500_hosts: List[str] = Field(default_factory=list, max_items=200)
+    terminate_instances: bool = True
+    rollback_to: Literal["ready-for-test", "ready-for-cutover"] = "ready-for-test"
+
+
+class MigrationExecutionJobApprovalRequest(BaseModel):
+    expected_version: int = Field(..., ge=1)
+    confirmation: str = Field(..., min_length=4, max_length=160)
     comment: Optional[str] = Field(default=None, max_length=2000)

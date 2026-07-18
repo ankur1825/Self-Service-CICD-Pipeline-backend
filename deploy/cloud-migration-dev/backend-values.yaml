@@ -1,6 +1,12 @@
 namespaceOverride: horizon-cloud-migration-dev
 fullnameOverride: horizon-cloud-migration-backend
 
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: 0
+    maxUnavailable: 1
+
 image:
   repository: 426946630837.dkr.ecr.us-east-1.amazonaws.com/horizon/backend
   tag: REPLACE_WITH_BACKEND_COMMIT_SHA
@@ -79,6 +85,18 @@ cloudMigration:
   aws:
     enabled: true
     executionEnabled: false
+    finalizationEnabled: false
+  worker:
+    # Enable after a real client account, IRSA role, MGN initialization, and
+    # source-network TCP 1500 probe targets are configured.
+    enabled: false
+    resources:
+      requests:
+        cpu: 1m
+        memory: 128Mi
+      limits:
+        cpu: 100m
+        memory: 384Mi
 
 enterprise:
   licenseEnforcementEnabled: true

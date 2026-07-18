@@ -47,6 +47,12 @@ class AwsMigrationAdapter(MigrationProviderAdapter):
                 "FINALIZED",
             ],
             "execution_enabled": _env_bool("CLOUD_MIGRATION_AWS_EXECUTION_ENABLED", False),
+            "execution_worker": {
+                "configured": _env_bool("CLOUD_MIGRATION_WORKER_ENABLED", False),
+                "read_only_actions": ["PREFLIGHT", "RECONCILE"],
+                "mutating_actions_require_separate_approval": True,
+                "finalization_enabled": _env_bool("CLOUD_MIGRATION_FINALIZATION_ENABLED", False),
+            },
             "data_boundary": os.getenv("CLOUD_MIGRATION_DATA_BOUNDARY", "client-hosted"),
             "required_entitlements": ["cloud_migration", "cloud_migration_aws"],
         }

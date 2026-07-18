@@ -1,5 +1,8 @@
 # `horizon-cloud-migration-dev` deployment overlay
 
+For the client-hosted AWS worker, IAM model, safety locks, and execution API, see
+[`../../docs/cloud-migration-client-hosted-worker.md`](../../docs/cloud-migration-client-hosted-worker.md).
+
 This overlay deploys the feature-branch control plane without changing `horizon-relevance-dev`. AWS execution, license sync, usage reporting, Jenkins integration, and self-approval are disabled.
 
 ## Prerequisites

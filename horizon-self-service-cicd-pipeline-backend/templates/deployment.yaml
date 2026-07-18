@@ -7,6 +7,8 @@ metadata:
     {{- include "horizon-self-service-cicd-pipeline-backend.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  strategy:
+    {{- toYaml .Values.strategy | nindent 4 }}
   selector:
     matchLabels:
       app: {{ include "horizon-self-service-cicd-pipeline-backend.fullname" . }}
@@ -85,6 +87,10 @@ spec:
               value: {{ .Values.cloudMigration.aws.enabled | quote }}
             - name: CLOUD_MIGRATION_AWS_EXECUTION_ENABLED
               value: {{ .Values.cloudMigration.aws.executionEnabled | quote }}
+            - name: CLOUD_MIGRATION_FINALIZATION_ENABLED
+              value: {{ .Values.cloudMigration.aws.finalizationEnabled | default false | quote }}
+            - name: CLOUD_MIGRATION_WORKER_ENABLED
+              value: {{ .Values.cloudMigration.worker.enabled | default false | quote }}
             {{- if .Values.jenkins.enabled }}
             - name: JENKINS_URL
               value: {{ .Values.jenkins.url | default "https://horizonrelevance.com/jenkins" | quote }}

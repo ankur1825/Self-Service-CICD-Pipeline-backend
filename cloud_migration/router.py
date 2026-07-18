@@ -1,13 +1,23 @@
 from typing import Any, Callable
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Header, Query
 from sqlalchemy.orm import Session
 
 from .schemas import (
+    ExecutionAction,
+    MigrationExecutionJobApprovalRequest,
+    MigrationExecutionJobRequest,
     MigrationProjectCreate,
     MigrationWaveApprovalRequest,
     MigrationWaveCreate,
     MigrationWavePlanRequest,
+)
+from .execution_service import (
+    approve_execution_job,
+    enqueue_execution_job,
+    get_execution_evidence,
+    get_execution_job,
+    list_execution_jobs,
 )
 from .service import (
     adapter_capabilities,
@@ -104,6 +114,51 @@ def build_cloud_migration_router(
         principal: Any = Depends(principal_dependency),
     ):
         return approve_wave(db, principal, wave_id, request)
+
+    @router.get("/waves/{wave_id}/jobs")
+    def get_wave_execution_jobs(
+        wave_id: str,
+        limit: int = Query(default=100, ge=1, le=500),
+        db: Session = Depends(db_dependency),
+        principal: Any = Depends(principal_dependency),
+    ):
+        return {"jobs": list_execution_jobs(db, principal, wave_id, limit)}
+
+    @router.post("/waves/{wave_id}/jobs/{action_name}", status_code=202)
+    def post_wave_execution_job(
+        wave_id: str,
+        action_name: ExecutionAction,
+        request: MigrationExecutionJobRequest,
+        idempotency_key: str = Header(..., alias="Idempotency-Key", min_length=8, max_length=128),
+        db: Session = Depends(db_dependency),
+        principal: Any = Depends(principal_dependency),
+    ):
+        return enqueue_execution_job(db, principal, wave_id, action_name, request, idempotency_key)
+
+    @router.get("/jobs/{job_id}")
+    def get_job_by_id(
+        job_id: str,
+        db: Session = Depends(db_dependency),
+        principal: Any = Depends(principal_dependency),
+    ):
+        return get_execution_job(db, principal, job_id)
+
+    @router.post("/jobs/{job_id}/approve", status_code=202)
+    def post_job_approval(
+        job_id: str,
+        request: MigrationExecutionJobApprovalRequest,
+        db: Session = Depends(db_dependency),
+        principal: Any = Depends(principal_dependency),
+    ):
+        return approve_execution_job(db, principal, job_id, request)
+
+    @router.get("/evidence/{evidence_id}")
+    def get_evidence_by_id(
+        evidence_id: str,
+        db: Session = Depends(db_dependency),
+        principal: Any = Depends(principal_dependency),
+    ):
+        return get_execution_evidence(db, principal, evidence_id)
 
     @router.get("/audit-events")
     def get_audit_events(

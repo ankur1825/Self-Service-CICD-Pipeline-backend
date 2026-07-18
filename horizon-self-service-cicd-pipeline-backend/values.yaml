@@ -2,6 +2,12 @@ fullnameOverride: ""
 namespaceOverride: horizon-relevance-dev
 replicaCount: 1
 
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: 25%
+    maxUnavailable: 25%
+
 image:
   repository: 426946630837.dkr.ecr.us-east-1.amazonaws.com/horizon/backend
   tag: "1.4.50"
@@ -128,6 +134,28 @@ cloudMigration:
     # Enables provider discovery and planning only. Turn on after the client
     # approves IAM/network preflight and the execution worker is installed.
     executionEnabled: false
+    finalizationEnabled: false
+  worker:
+    enabled: false
+    replicaCount: 1
+    pollSeconds: 5
+    leaseSeconds: 900
+    networkVantage: client-worker
+    serviceAccount:
+      create: true
+      name: ""
+      automount: true
+      annotations: {}
+    awsExternalIdSecret:
+      existingSecret: ""
+      key: CLOUD_MIGRATION_AWS_EXTERNAL_ID
+    resources:
+      requests:
+        cpu: 10m
+        memory: 128Mi
+      limits:
+        cpu: 250m
+        memory: 384Mi
 
 enterprise:
   licenseEnforcementEnabled: false

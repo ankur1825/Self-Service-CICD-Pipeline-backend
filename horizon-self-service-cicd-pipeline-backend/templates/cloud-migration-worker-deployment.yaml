@@ -1,0 +1,138 @@
+{{- if .Values.cloudMigration.worker.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "horizon-self-service-cicd-pipeline-backend.fullname" . }}-worker
+  namespace: {{ .Values.namespaceOverride }}
+  labels:
+    {{- include "horizon-self-service-cicd-pipeline-backend.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migration-execution-worker
+spec:
+  replicas: {{ .Values.cloudMigration.worker.replicaCount }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: {{ include "horizon-self-service-cicd-pipeline-backend.fullname" . }}-worker
+  template:
+    metadata:
+      labels:
+        app: {{ include "horizon-self-service-cicd-pipeline-backend.fullname" . }}-worker
+        app.kubernetes.io/component: migration-execution-worker
+    spec:
+      serviceAccountName: {{ default (printf "%s-worker" (include "horizon-self-service-cicd-pipeline-backend.fullname" .)) .Values.cloudMigration.worker.serviceAccount.name }}
+      automountServiceAccountToken: {{ .Values.cloudMigration.worker.serviceAccount.automount }}
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: migration-execution-worker
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-m", "cloud_migration.execution.worker"]
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.cloudMigration.worker.resources | nindent 12 }}
+          env:
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+            - name: AWS_STS_REGIONAL_ENDPOINTS
+              value: regional
+            - name: CLOUD_MIGRATION_WORKER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: CLOUD_MIGRATION_WORKER_POLL_SECONDS
+              value: {{ .Values.cloudMigration.worker.pollSeconds | quote }}
+            - name: CLOUD_MIGRATION_WORKER_LEASE_SECONDS
+              value: {{ .Values.cloudMigration.worker.leaseSeconds | quote }}
+            - name: CLOUD_MIGRATION_NETWORK_VANTAGE
+              value: {{ .Values.cloudMigration.worker.networkVantage | quote }}
+            - name: CLOUD_MIGRATION_ENABLED
+              value: {{ .Values.cloudMigration.enabled | quote }}
+            - name: CLOUD_MIGRATION_DATA_BOUNDARY
+              value: {{ .Values.cloudMigration.dataBoundary | default "client-hosted" | quote }}
+            - name: CLOUD_MIGRATION_AWS_ENABLED
+              value: {{ .Values.cloudMigration.aws.enabled | quote }}
+            - name: CLOUD_MIGRATION_AWS_EXECUTION_ENABLED
+              value: {{ .Values.cloudMigration.aws.executionEnabled | quote }}
+            - name: CLOUD_MIGRATION_FINALIZATION_ENABLED
+              value: {{ .Values.cloudMigration.aws.finalizationEnabled | default false | quote }}
+            {{- if .Values.database.existingSecret }}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret | quote }}
+                  key: {{ .Values.database.key | default "DATABASE_URL" | quote }}
+            {{- else if .Values.database.url }}
+            - name: DATABASE_URL
+              value: {{ .Values.database.url | quote }}
+            {{- end }}
+            {{- if .Values.cloudMigration.worker.awsExternalIdSecret.existingSecret }}
+            - name: CLOUD_MIGRATION_AWS_EXTERNAL_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.cloudMigration.worker.awsExternalIdSecret.existingSecret | quote }}
+                  key: {{ .Values.cloudMigration.worker.awsExternalIdSecret.key | quote }}
+            {{- end }}
+            - name: ENTERPRISE_LICENSE_ENFORCEMENT_ENABLED
+              value: {{ .Values.enterprise.licenseEnforcementEnabled | quote }}
+            - name: ENTERPRISE_LICENSE_MODE
+              value: {{ .Values.enterprise.licenseMode | quote }}
+            - name: ENTERPRISE_LICENSE_FILE
+              value: {{ ternary .Values.enterprise.licenseDocumentSecret.mountPath .Values.enterprise.licenseFile (ne .Values.enterprise.licenseDocumentSecret.existingSecret "") | quote }}
+            - name: ENTERPRISE_LICENSE_CACHE_FILE
+              value: {{ .Values.enterprise.licenseCacheFile | quote }}
+            - name: ENTERPRISE_LICENSE_SIGNATURE_VERIFICATION_REQUIRED
+              value: {{ .Values.enterprise.licenseSignatureVerificationRequired | quote }}
+            {{- if .Values.enterprise.signingSecret.existingSecret }}
+            - name: ENTERPRISE_LICENSE_SIGNING_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.enterprise.signingSecret.existingSecret | quote }}
+                  key: {{ .Values.enterprise.signingSecret.key | quote }}
+            {{- end }}
+            {{- with .Values.enterprise.publicKeySecret }}
+            {{- if .existingSecret }}
+            - name: ENTERPRISE_LICENSE_PUBLIC_KEY_PEM
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .existingSecret | quote }}
+                  key: {{ .key | quote }}
+            {{- end }}
+            {{- end }}
+          volumeMounts:
+            - name: app-data
+              mountPath: {{ .Values.persistence.mountPath }}
+            {{- if .Values.enterprise.licenseDocumentSecret.existingSecret }}
+            - name: enterprise-license-document
+              mountPath: {{ .Values.enterprise.licenseDocumentSecret.mountPath | quote }}
+              subPath: {{ .Values.enterprise.licenseDocumentSecret.key | quote }}
+              readOnly: true
+            {{- end }}
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: app-data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "horizon-self-service-cicd-pipeline-backend.fullname" . }}-pvc
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- if .Values.enterprise.licenseDocumentSecret.existingSecret }}
+        - name: enterprise-license-document
+          secret:
+            secretName: {{ .Values.enterprise.licenseDocumentSecret.existingSecret | quote }}
+            items:
+              - key: {{ .Values.enterprise.licenseDocumentSecret.key | quote }}
+                path: {{ .Values.enterprise.licenseDocumentSecret.key | quote }}
+        {{- end }}
+        - name: tmp
+          emptyDir: {}
+{{- end }}

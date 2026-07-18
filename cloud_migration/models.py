@@ -160,3 +160,74 @@ class MigrationTransferProfile(Base):
     created_by = Column(String(256), nullable=False)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class MigrationExecutionJob(Base):
+    """Durable, idempotent work item consumed by a client-hosted worker."""
+
+    __tablename__ = "cloud_migration_execution_jobs"
+    __table_args__ = (
+        UniqueConstraint(
+            "client_id",
+            "idempotency_key",
+            name="uq_cloud_migration_execution_job_client_idempotency",
+        ),
+    )
+
+    id = Column(String(36), primary_key=True)
+    client_id = Column(String(128), nullable=False, index=True)
+    project_id = Column(
+        String(36),
+        ForeignKey("cloud_migration_projects.id", name="fk_cloud_migration_execution_jobs_project_id"),
+        nullable=False,
+        index=True,
+    )
+    wave_id = Column(
+        String(36),
+        ForeignKey("cloud_migration_waves.id", name="fk_cloud_migration_execution_jobs_wave_id"),
+        nullable=False,
+        index=True,
+    )
+    action = Column(String(32), nullable=False, index=True)
+    provider = Column(String(16), nullable=False, default="aws")
+    status = Column(String(32), nullable=False, default="QUEUED", index=True)
+    idempotency_key = Column(String(128), nullable=False)
+    request_json = Column(Text, nullable=True)
+    result_json = Column(Text, nullable=True)
+    requested_by = Column(String(256), nullable=False)
+    approved_by = Column(String(256), nullable=True)
+    approval_comment = Column(Text, nullable=True)
+    plan_version = Column(Integer, nullable=False, default=0)
+    version = Column(Integer, nullable=False, default=1)
+    attempts = Column(Integer, nullable=False, default=0)
+    max_attempts = Column(Integer, nullable=False, default=3)
+    error_code = Column(String(128), nullable=True)
+    error_message = Column(Text, nullable=True)
+    not_before = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    lease_owner = Column(String(256), nullable=True, index=True)
+    lease_expires_at = Column(DateTime, nullable=True, index=True)
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class MigrationEvidenceArtifact(Base):
+    """Tamper-evident execution result retained inside the client's boundary."""
+
+    __tablename__ = "cloud_migration_evidence_artifacts"
+
+    id = Column(String(36), primary_key=True)
+    client_id = Column(String(128), nullable=False, index=True)
+    project_id = Column(String(36), nullable=False, index=True)
+    wave_id = Column(String(36), nullable=False, index=True)
+    job_id = Column(
+        String(36),
+        ForeignKey("cloud_migration_execution_jobs.id", name="fk_cloud_migration_evidence_artifacts_job_id"),
+        nullable=False,
+        index=True,
+    )
+    evidence_type = Column(String(64), nullable=False, index=True)
+    content_sha256 = Column(String(64), nullable=False)
+    payload_json = Column(Text, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)

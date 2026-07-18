@@ -35,7 +35,8 @@ flowchart LR
     API --> Catalog["Environment Catalog"]
     API --> DB["Client-hosted project, wave, plan and audit store"]
     API --> Adapter["AWS provider adapter"]
-    Adapter -. execution disabled in foundation .-> Worker["Client-hosted AWS execution worker"]
+    Adapter --> Queue["Durable execution jobs and approvals"]
+    Queue --> Worker["Client-hosted AWS execution worker"]
     Worker --> MGN["AWS Application Migration Service"]
     Worker --> AWS["Client AWS accounts"]
 ```
@@ -57,7 +58,7 @@ License validation runs server-side for project creation, wave creation, plannin
 
 ## Migration roles
 
-| Role | Read | Create project/wave | Generate plan | Approve |
+| Role | Read | Create/plan | Request job | Approve wave/job |
 |---|---:|---:|---:|---:|
 | `platform-admin` | yes | yes | yes | yes* |
 | `migration-architect` | yes | yes | yes | no |
@@ -90,6 +91,10 @@ All endpoints are under `/pipeline/api/cloud-migration` at runtime.
 - `GET|POST /projects/{project_id}/waves`
 - `POST /waves/{wave_id}/plan`
 - `POST /waves/{wave_id}/approve`
+- `GET|POST /waves/{wave_id}/jobs[/<action>]`
+- `GET /jobs/{job_id}`
+- `POST /jobs/{job_id}/approve`
+- `GET /evidence/{evidence_id}`
 - `GET /audit-events`
 
 ## Deployment configuration
@@ -104,22 +109,26 @@ cloudMigration:
   aws:
     enabled: true
     executionEnabled: false
+    finalizationEnabled: false
+  worker:
+    enabled: false
 ```
 
-SQLite on the client PVC remains the default for a small installation. Production clients can provide a PostgreSQL SQLAlchemy URL with `database.existingSecret`; schema migrations and database backup/restore must be included in the production release runbook.
+SQLite on the client PVC remains the default for a small control-plane-only installation. PostgreSQL is required when the execution worker is enabled; schema migrations and database backup/restore must be included in the production release runbook.
 
-## Required next AWS execution increment
+## AWS execution increment
 
-`cloudMigration.aws.executionEnabled` intentionally defaults to `false`. Planning and approval must not imply that workload migration has occurred. Before execution is enabled, add and validate:
+`cloudMigration.aws.executionEnabled` still defaults to `false`. The client-hosted worker now provides durable leased jobs, STS identity checks, network preflight, MGN reconciliation, test/cutover/rollback/finalization actions, separate job approval, bounded retries, and hashed evidence. Cutover finalization has an additional independent lock.
 
-1. a separate client-hosted worker with a narrow IAM role and durable job queue;
-2. AWS identity preflight using STS and explicit source/target account checks;
-3. MGN initialization, staging subnet, security group, TCP 443 endpoint, and TCP 1500 replication checks;
-4. source server discovery/import and idempotent replication job reconciliation;
-5. test-launch, smoke-test evidence, cutover-ready approval, cutover, rollback, and finalization states;
-6. encrypted evidence/log storage, retry policy, concurrency controls, quotas, and operational alerts;
-7. PostgreSQL migrations, backup/restore testing, high availability, and disaster recovery;
-8. client acceptance testing with representative Linux and Windows workloads.
+Before production enablement, each client must still complete:
+
+1. client-specific IRSA and target-role review using the Terraform examples;
+2. MGN initialization, staging subnet, security-group, endpoint, and source-route validation;
+3. PostgreSQL backup/restore, high availability, disaster recovery, and capacity testing;
+4. alerting and evidence export integration with client operational systems;
+5. representative Linux and Windows replication, test, rollback, and cutover rehearsals.
+
+See `cloud-migration-client-hosted-worker.md` for the enablement and execution runbook.
 
 Infrastructure-as-code should provision the AWS landing-zone and MGN prerequisites. The migrated EC2 workload must be created from the replicated source disks through the provider migration service, not from an unrelated clean operating-system image.
 
