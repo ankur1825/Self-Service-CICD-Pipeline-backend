@@ -107,11 +107,15 @@ database:
   url: ""
   existingSecret: ""
   key: DATABASE_URL
+  migrations:
+    enabled: false
 
 cloudMigration:
   enabled: true
   dataBoundary: client-hosted
   allowSelfApproval: false
+  druva:
+    enabled: false
   aws:
     enabled: true
     # Enables provider discovery and planning only. Turn on after the client

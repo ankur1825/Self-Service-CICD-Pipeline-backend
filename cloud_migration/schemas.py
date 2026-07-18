@@ -3,8 +3,16 @@ from typing import List, Literal, Optional
 from pydantic import BaseModel, Field
 
 
-SourceType = Literal["aws-ec2", "external"]
-MigrationMethod = Literal["mgn", "ami-copy"]
+SourceType = Literal[
+    "external",
+    "onprem-vmware",
+    "onprem-physical",
+    "aws-ec2",
+    "azure-vm",
+    "gcp-vm",
+    "oci-compute",
+]
+MigrationMethod = Literal["mgn", "ami-copy", "druva"]
 
 
 class MigrationProjectCreate(BaseModel):

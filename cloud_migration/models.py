@@ -20,6 +20,18 @@ class MigrationProject(Base):
     target_provider = Column(String(16), nullable=False, default="aws")
     target_environment = Column(String(64), nullable=False)
     target_account_id = Column(String(64), nullable=False)
+    source_endpoint_id = Column(
+        String(36),
+        ForeignKey("cloud_migration_endpoints.id", name="fk_cloud_migration_projects_source_endpoint_id"),
+        nullable=True,
+        index=True,
+    )
+    target_endpoint_id = Column(
+        String(36),
+        ForeignKey("cloud_migration_endpoints.id", name="fk_cloud_migration_projects_target_endpoint_id"),
+        nullable=True,
+        index=True,
+    )
     status = Column(String(32), nullable=False, default="DRAFT", index=True)
     created_by = Column(String(256), nullable=False)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
@@ -43,6 +55,13 @@ class MigrationWave(Base):
     project_id = Column(String(36), ForeignKey("cloud_migration_projects.id"), nullable=False, index=True)
     name = Column(String(160), nullable=False)
     migration_method = Column(String(32), nullable=False, default="mgn")
+    migration_strategy = Column(String(32), nullable=False, default="rehost")
+    transfer_profile_id = Column(
+        String(36),
+        ForeignKey("cloud_migration_transfer_profiles.id", name="fk_cloud_migration_waves_transfer_profile_id"),
+        nullable=True,
+        index=True,
+    )
     source_region = Column(String(64), nullable=True)
     target_region = Column(String(64), nullable=False)
     maintenance_window = Column(String(160), nullable=True)
@@ -96,3 +115,48 @@ class MigrationAuditEvent(Base):
     entity_id = Column(String(36), nullable=False, index=True)
     payload_json = Column(Text, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+
+
+class MigrationEndpoint(Base):
+    __tablename__ = "cloud_migration_endpoints"
+    __table_args__ = (
+        UniqueConstraint("client_id", "name", name="uq_cloud_migration_endpoint_client_name"),
+    )
+
+    id = Column(String(36), primary_key=True)
+    client_id = Column(String(128), nullable=False, index=True)
+    name = Column(String(160), nullable=False)
+    endpoint_role = Column(String(16), nullable=False)
+    provider = Column(String(32), nullable=False, index=True)
+    environment_name = Column(String(64), nullable=True)
+    account_scope = Column(String(128), nullable=True)
+    location = Column(String(128), nullable=True)
+    identity_profile_ref = Column(String(256), nullable=True)
+    network_profile_ref = Column(String(256), nullable=True)
+    provider_config_json = Column(Text, nullable=True)
+    status = Column(String(32), nullable=False, default="DRAFT", index=True)
+    created_by = Column(String(256), nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class MigrationTransferProfile(Base):
+    __tablename__ = "cloud_migration_transfer_profiles"
+    __table_args__ = (
+        UniqueConstraint("client_id", "name", name="uq_cloud_migration_transfer_profile_client_name"),
+    )
+
+    id = Column(String(36), primary_key=True)
+    client_id = Column(String(128), nullable=False, index=True)
+    name = Column(String(160), nullable=False)
+    adapter_key = Column(String(64), nullable=False, index=True)
+    adapter_version = Column(String(32), nullable=False, default="v1alpha1")
+    category = Column(String(32), nullable=False, default="replication")
+    license_mode = Column(String(64), nullable=False, default="included")
+    credential_ref = Column(String(256), nullable=True)
+    configuration_json = Column(Text, nullable=True)
+    enabled = Column(Integer, nullable=False, default=0, index=True)
+    status = Column(String(32), nullable=False, default="DRAFT", index=True)
+    created_by = Column(String(256), nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)

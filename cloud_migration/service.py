@@ -15,6 +15,7 @@ from enterprise.licensing import (
 )
 from models import EnvironmentCatalog
 
+from .adapters import adapter_registry
 from .models import MigrationAuditEvent, MigrationProject, MigrationWave, MigrationWorkload
 from .providers.aws import AwsMigrationAdapter
 from .schemas import MigrationProjectCreate, MigrationWaveApprovalRequest, MigrationWaveCreate
@@ -90,6 +91,7 @@ def validate_module_license(
     *,
     target_environment: Optional[str] = None,
     aws_account_id: Optional[str] = None,
+    required_entitlements: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     if not _env_bool("CLOUD_MIGRATION_ENABLED", True):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cloud Migration Factory is disabled for this installation.")
@@ -101,7 +103,7 @@ def validate_module_license(
             license_doc,
             pipeline_name=PIPELINE_NAME,
             target_env=target_environment or _validation_environment(license_doc),
-            requested_features=REQUIRED_ENTITLEMENTS,
+            requested_features=required_entitlements or REQUIRED_ENTITLEMENTS,
             aws_account_id=aws_account_id,
         )
     except LicenseValidationError as exc:
@@ -111,6 +113,20 @@ def validate_module_license(
 def capabilities() -> Dict[str, Any]:
     adapter = AwsMigrationAdapter()
     provider = adapter.capabilities()
+    provider["source_types"] = [
+        item.key for item in adapter_registry.capabilities("source")
+    ]
+    provider["migration_methods"] = [
+        {
+            "key": item.key,
+            "display_name": item.display_name,
+            "status": item.status,
+            "recommended": item.recommended,
+            "license_mode": item.license_mode,
+        }
+        for item in adapter_registry.capabilities("transfer")
+        if "aws" in item.target_providers
+    ]
     license_doc = _license_document()
     licensed = _env_bool("CLOUD_MIGRATION_ENABLED", True)
     reason = None if licensed else "Cloud Migration Factory is disabled for this installation."
@@ -137,8 +153,44 @@ def capabilities() -> Dict[str, Any]:
         "license": summary,
         "required_entitlements": REQUIRED_ENTITLEMENTS,
         "providers": [provider],
+        "adapter_catalog": adapter_registry.catalog(),
         "data_boundary": provider["data_boundary"],
     }
+
+
+def adapter_capabilities(principal: Any) -> Dict[str, Any]:
+    require_migration_role(principal, READ_ROLES, "Viewing migration adapters")
+    validate_module_license()
+    return adapter_registry.catalog()
+
+
+def migration_compatibility(
+    principal: Any,
+    source_type: str,
+    target_provider: str,
+    strategy: str = "rehost",
+) -> Dict[str, Any]:
+    require_migration_role(principal, READ_ROLES, "Evaluating migration compatibility")
+    validate_module_license()
+    result = adapter_registry.compatibility(source_type, target_provider, strategy)
+    for adapter in result["transfer_adapters"]:
+        if adapter["status"] != "available":
+            continue
+        try:
+            validate_module_license(required_entitlements=adapter["required_entitlements"])
+        except HTTPException as exc:
+            adapter["status"] = "unlicensed"
+            adapter["unavailable_reason"] = str(exc.detail)
+
+    available = [adapter for adapter in result["transfer_adapters"] if adapter["status"] == "available"]
+    result["supported"] = bool(result["source_adapter"] and result["target_adapter"] and available)
+    result["recommended_transfer_adapter"] = next(
+        (adapter["key"] for adapter in available if adapter["recommended"]),
+        available[0]["key"] if available else None,
+    )
+    if result["source_adapter"] and result["target_adapter"] and not available:
+        result["reasons"].append("No licensed and configured transfer adapter is available for this path.")
+    return result
 
 
 def _environment(db: Session, name: str) -> EnvironmentCatalog:
@@ -216,6 +268,8 @@ def wave_dict(wave: MigrationWave, include_plan: bool = True) -> Dict[str, Any]:
         "project_id": wave.project_id,
         "name": wave.name,
         "migration_method": wave.migration_method,
+        "migration_strategy": wave.migration_strategy,
+        "transfer_profile_id": wave.transfer_profile_id,
         "source_region": wave.source_region,
         "target_region": wave.target_region,
         "maintenance_window": wave.maintenance_window,
@@ -243,6 +297,8 @@ def project_dict(project: MigrationProject, include_waves: bool = False) -> Dict
         "target_provider": project.target_provider,
         "target_environment": project.target_environment,
         "target_account_id": project.target_account_id,
+        "source_endpoint_id": project.source_endpoint_id,
+        "target_endpoint_id": project.target_endpoint_id,
         "status": project.status,
         "created_by": project.created_by,
         "created_at": project.created_at,
@@ -351,6 +407,38 @@ def create_wave(
     if not principal_can_use_environment(principal, environment.name):
         raise HTTPException(status_code=403, detail=f"Current roles cannot use environment '{environment.name}'.")
     validate_module_license(target_environment=environment.name, aws_account_id=environment.aws_account_id)
+
+    compatibility = adapter_registry.compatibility(
+        project.source_type,
+        project.target_provider,
+        "rehost",
+    )
+    selected_adapter = next(
+        (
+            adapter
+            for adapter in compatibility["transfer_adapters"]
+            if adapter["key"] == request.migration_method
+        ),
+        None,
+    )
+    if not selected_adapter:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Transfer method '{request.migration_method}' is not compatible with "
+                f"source '{project.source_type}' and target '{project.target_provider}'."
+            ),
+        )
+    if selected_adapter["status"] != "available":
+        raise HTTPException(
+            status_code=409,
+            detail=selected_adapter.get("unavailable_reason") or "The selected transfer adapter is unavailable.",
+        )
+    validate_module_license(
+        target_environment=environment.name,
+        aws_account_id=environment.aws_account_id,
+        required_entitlements=selected_adapter["required_entitlements"],
+    )
 
     wave = MigrationWave(
         id=str(uuid.uuid4()),

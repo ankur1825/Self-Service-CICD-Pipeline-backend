@@ -53,6 +53,8 @@ ldap:
 database:
   existingSecret: cloud-migration-database
   key: DATABASE_URL
+  migrations:
+    enabled: true
 
 auth:
   rbacEnforcementEnabled: true
@@ -65,6 +67,8 @@ cloudMigration:
   enabled: true
   dataBoundary: client-hosted
   allowSelfApproval: false
+  druva:
+    enabled: false
   aws:
     enabled: true
     executionEnabled: false

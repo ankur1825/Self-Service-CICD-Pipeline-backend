@@ -79,6 +79,8 @@ spec:
               value: {{ .Values.cloudMigration.dataBoundary | default "client-hosted" | quote }}
             - name: CLOUD_MIGRATION_ALLOW_SELF_APPROVAL
               value: {{ .Values.cloudMigration.allowSelfApproval | quote }}
+            - name: CLOUD_MIGRATION_DRUVA_ENABLED
+              value: {{ .Values.cloudMigration.druva.enabled | default false | quote }}
             - name: CLOUD_MIGRATION_AWS_ENABLED
               value: {{ .Values.cloudMigration.aws.enabled | quote }}
             - name: CLOUD_MIGRATION_AWS_EXECUTION_ENABLED

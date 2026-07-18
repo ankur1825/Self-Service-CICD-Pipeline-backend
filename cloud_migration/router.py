@@ -10,6 +10,7 @@ from .schemas import (
     MigrationWavePlanRequest,
 )
 from .service import (
+    adapter_capabilities,
     approve_wave,
     capabilities,
     create_project,
@@ -18,6 +19,7 @@ from .service import (
     list_audit_events,
     list_projects,
     list_waves,
+    migration_compatibility,
     plan_wave,
 )
 
@@ -31,6 +33,19 @@ def build_cloud_migration_router(
     @router.get("/capabilities")
     def get_capabilities(principal: Any = Depends(principal_dependency)):
         return capabilities()
+
+    @router.get("/adapters")
+    def get_adapters(principal: Any = Depends(principal_dependency)):
+        return adapter_capabilities(principal)
+
+    @router.get("/compatibility")
+    def get_compatibility(
+        source_type: str = Query(..., min_length=2, max_length=64),
+        target_provider: str = Query(default="aws", min_length=2, max_length=32),
+        strategy: str = Query(default="rehost", min_length=2, max_length=32),
+        principal: Any = Depends(principal_dependency),
+    ):
+        return migration_compatibility(principal, source_type, target_provider, strategy)
 
     @router.get("/projects")
     def get_projects(

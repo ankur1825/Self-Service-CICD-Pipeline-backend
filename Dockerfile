@@ -22,6 +22,8 @@ WORKDIR /app
 
 COPY --from=builder /opt/venv /opt/venv
 COPY main.py database.py models.py schemas.py ./
+COPY alembic.ini ./
+COPY alembic ./alembic
 COPY enterprise ./enterprise
 COPY cloud_migration ./cloud_migration
 RUN useradd --create-home --uid 10001 appuser && \
