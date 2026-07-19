@@ -1,0 +1,238 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: horizon-cloud-migration-aws-sandbox
+  labels:
+    app.kubernetes.io/part-of: horizon-cloud-migration
+    horizonrelevance.com/environment: aws-sandbox
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: aws-sandbox-quota
+  namespace: horizon-cloud-migration-aws-sandbox
+spec:
+  hard:
+    requests.cpu: "500m"
+    requests.memory: 512Mi
+    limits.cpu: "1"
+    limits.memory: 1Gi
+    pods: "5"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: horizon-cloud-migration-backend-worker
+  namespace: horizon-cloud-migration-aws-sandbox
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::426946630837:role/horizon-cloud-migration-aws-sandbox-worker
+automountServiceAccountToken: true
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: horizon-cloud-migration-aws-sandbox
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-aws-preflight-egress
+  namespace: horizon-cloud-migration-aws-sandbox
+spec:
+  podSelector:
+    matchLabels:
+      app: horizon-cloud-migration-aws-preflight
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Kubernetes NetworkPolicy cannot select AWS services by FQDN. This
+    # sandbox rule is intentionally limited to TLS; production clients should
+    # route it through inspected egress or regional VPC endpoints.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 169.254.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: horizon-cloud-migration-aws-preflight
+  namespace: horizon-cloud-migration-aws-sandbox
+  labels:
+    app: horizon-cloud-migration-aws-preflight
+    app.kubernetes.io/component: migration-execution-preflight
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: horizon-cloud-migration-aws-preflight
+        app.kubernetes.io/component: migration-execution-preflight
+    spec:
+      restartPolicy: Never
+      serviceAccountName: horizon-cloud-migration-backend-worker
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: preflight
+          image: 426946630837.dkr.ecr.us-east-1.amazonaws.com/horizon/backend@sha256:debd0154be9d13bbfe1482567b3770c739be8a28fadf6fce8a0d4ebb73f45efd
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+          resources:
+            requests:
+              cpu: 1m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 384Mi
+          env:
+            - name: AWS_REGION
+              value: us-east-1
+            - name: AWS_DEFAULT_REGION
+              value: us-east-1
+            - name: AWS_STS_REGIONAL_ENDPOINTS
+              value: regional
+            - name: EXPECTED_AWS_ACCOUNT_ID
+              value: "426946630837"
+            - name: TARGET_AWS_ROLE_ARN
+              value: arn:aws:iam::426946630837:role/HorizonCloudMigrationSandboxExecutionRole
+            - name: TARGET_AWS_EXTERNAL_ID
+              valueFrom:
+                secretKeyRef:
+                  name: cloud-migration-aws-external-id
+                  key: external-id
+          command:
+            - python
+            - -c
+            - |
+              import json
+              import os
+              import socket
+              import ssl
+              import sys
+              import time
+
+              import boto3
+              from botocore.exceptions import ClientError
+
+              region = os.environ["AWS_REGION"]
+              expected_account = os.environ["EXPECTED_AWS_ACCOUNT_ID"]
+              role_arn = os.environ["TARGET_AWS_ROLE_ARN"]
+              external_id = os.environ["TARGET_AWS_EXTERNAL_ID"]
+              result = {"region": region, "checks": []}
+
+              def record(name, status, **details):
+                  result["checks"].append({"name": name, "status": status, **details})
+
+              def tls_probe(host):
+                  started = time.monotonic()
+                  with socket.create_connection((host, 443), timeout=5) as connection:
+                      context = ssl.create_default_context()
+                      with context.wrap_socket(connection, server_hostname=host) as secured:
+                          secured.do_handshake()
+                  record(
+                      "tls:" + host,
+                      "PASS",
+                      latency_ms=round((time.monotonic() - started) * 1000, 1),
+                  )
+
+              try:
+                  tls_probe(f"sts.{region}.amazonaws.com")
+                  tls_probe(f"mgn.{region}.amazonaws.com")
+
+                  base_sts = boto3.client("sts", region_name=region)
+                  base_identity = base_sts.get_caller_identity()
+                  base_account = base_identity["Account"]
+                  record(
+                      "irsa_identity",
+                      "PASS" if base_account == expected_account else "FAIL",
+                      account=base_account,
+                      arn=base_identity["Arn"],
+                  )
+                  if base_account != expected_account:
+                      raise RuntimeError("IRSA resolved to the wrong AWS account")
+
+                  assumed = base_sts.assume_role(
+                      RoleArn=role_arn,
+                      RoleSessionName="horizon-real-preflight",
+                      DurationSeconds=900,
+                      ExternalId=external_id,
+                      Policy=json.dumps(
+                          {
+                              "Version": "2012-10-17",
+                              "Statement": [
+                                  {
+                                      "Effect": "Allow",
+                                      "Action": [
+                                          "mgn:DescribeJobs",
+                                          "mgn:DescribeSourceServers",
+                                      ],
+                                      "Resource": "*",
+                                  }
+                              ],
+                          },
+                          separators=(",", ":"),
+                      ),
+                  )
+                  credentials = assumed["Credentials"]
+                  client_args = {
+                      "region_name": region,
+                      "aws_access_key_id": credentials["AccessKeyId"],
+                      "aws_secret_access_key": credentials["SecretAccessKey"],
+                      "aws_session_token": credentials["SessionToken"],
+                  }
+                  target_identity = boto3.client("sts", **client_args).get_caller_identity()
+                  record(
+                      "target_role_identity",
+                      "PASS" if target_identity["Account"] == expected_account else "FAIL",
+                      account=target_identity["Account"],
+                      arn=target_identity["Arn"],
+                  )
+
+                  sources = boto3.client("mgn", **client_args).describe_source_servers(maxResults=10)
+                  record("mgn_read", "PASS", source_server_count=len(sources.get("items", [])))
+              except ClientError as error:
+                  aws_error = error.response.get("Error", {})
+                  record(
+                      "aws_api",
+                      "FAIL",
+                      code=aws_error.get("Code", "ClientError"),
+                      message=aws_error.get("Message", "AWS API request failed"),
+                  )
+              except Exception as error:
+                  record("preflight", "FAIL", code=type(error).__name__, message=str(error))
+
+              print(json.dumps(result, sort_keys=True))
+              sys.exit(0 if all(item["status"] == "PASS" for item in result["checks"]) else 1)
