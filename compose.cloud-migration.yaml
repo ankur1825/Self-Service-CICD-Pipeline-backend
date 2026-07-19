@@ -1,0 +1,126 @@
+name: horizon-cloud-migration
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: cloud_migration
+      POSTGRES_USER: cloud_migration
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run deploy/local/prepare.py and pass --env-file .local/runtime.env}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cloud_migration -d cloud_migration"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - control-plane
+
+  ldap:
+    image: osixia/openldap:1.5.0
+    environment:
+      LDAP_ORGANISATION: Horizon Cloud Migration Local
+      LDAP_DOMAIN: horizonrelevance.local
+      LDAP_BASE_DN: dc=horizonrelevance,dc=local
+      LDAP_ADMIN_PASSWORD: ${LDAP_ADMIN_PASSWORD:?Run deploy/local/prepare.py and pass --env-file .local/runtime.env}
+      LDAP_CONFIG_PASSWORD: ${LDAP_ADMIN_PASSWORD:?Run deploy/local/prepare.py and pass --env-file .local/runtime.env}
+      LDAP_TLS: "false"
+      LDAP_REMOVE_CONFIG_AFTER_SETUP: "true"
+    command: ["--copy-service"]
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          ldapsearch -x -H ldap://127.0.0.1:389
+          -D cn=admin,dc=horizonrelevance,dc=local
+          -w "$${LDAP_ADMIN_PASSWORD}"
+          -b dc=horizonrelevance,dc=local -s base dn >/dev/null
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    volumes:
+      - ./deploy/local/ldap/bootstrap.ldif:/container/service/slapd/assets/config/bootstrap/ldif/custom/50-cloud-migration.ldif:ro
+      - ldap-data:/var/lib/ldap
+      - ldap-config:/etc/ldap/slapd.d
+    networks:
+      - control-plane
+
+  horizon-cloud-migration-backend:
+    image: horizon/cloud-migration-backend:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?Run deploy/local/prepare.py and pass --env-file .local/runtime.env}
+      LDAP_MANAGER_PASSWORD: ${LDAP_MANAGER_PASSWORD:?Run deploy/local/prepare.py and pass --env-file .local/runtime.env}
+      BACKEND_SESSION_SECRET: ${BACKEND_SESSION_SECRET:?Run deploy/local/prepare.py and pass --env-file .local/runtime.env}
+      ENTERPRISE_LICENSE_SIGNING_SECRET: ${ENTERPRISE_LICENSE_SIGNING_SECRET:?Run deploy/local/prepare.py and pass --env-file .local/runtime.env}
+      CLOUD_MIGRATION_ENABLED: "true"
+      CLOUD_MIGRATION_AWS_ENABLED: "true"
+      CLOUD_MIGRATION_AWS_EXECUTION_ENABLED: "false"
+      CLOUD_MIGRATION_ALLOW_SELF_APPROVAL: "false"
+      CLOUD_MIGRATION_DATA_BOUNDARY: client-hosted
+      ENTERPRISE_LICENSE_ENFORCEMENT_ENABLED: "true"
+      ENTERPRISE_LICENSE_SIGNATURE_VERIFICATION_REQUIRED: "true"
+      ENTERPRISE_LICENSE_FILE: /run/cloud-migration-license/license.json
+      ENTERPRISE_LICENSE_MODE: offline-file
+      ENTERPRISE_LICENSE_USAGE_REPORTING_ENABLED: "false"
+      ENVIRONMENT_CATALOG_FILE: /run/cloud-migration-config/environment-catalog.json
+      BACKEND_RBAC_ENFORCEMENT_ENABLED: "true"
+      LDAP_SERVER: ldap://ldap:389
+      LDAP_USER: cn=admin,dc=horizonrelevance,dc=local
+      LDAP_BASE_DN: ou=users,dc=horizonrelevance,dc=local
+      LDAP_GROUP_BASE_DN: ou=groups,dc=horizonrelevance,dc=local
+      LDAP_GROUP_SEARCH_FILTER: (objectClass=groupOfNames)
+      LDAP_GROUP_MEMBER_ATTRIBUTE: member
+      LDAP_GROUP_NAME_ATTRIBUTE: cn
+      LDAP_ROLE_GROUP_MAPPINGS: >-
+        {"platform-admin":["horizon-platform-admins"],"migration-architect":["horizon-migration-architects"],"migration-operator":["horizon-migration-operators"],"migration-approver":["horizon-migration-approvers"],"migration-auditor":["horizon-migration-auditors"]}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ldap:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3).read()
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    volumes:
+      - ./.local/license.json:/run/cloud-migration-license/license.json:ro
+      - ./.local/environment-catalog.json:/run/cloud-migration-config/environment-catalog.json:ro
+    networks:
+      - control-plane
+
+  ui:
+    image: horizon/cloud-migration-ui:local
+    build:
+      context: ${UI_CONTEXT}
+      dockerfile: Dockerfile
+    depends_on:
+      horizon-cloud-migration-backend:
+        condition: service_healthy
+    ports:
+      - "${CLOUD_MIGRATION_PORT:-8080}:8080"
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    networks:
+      - control-plane
+
+volumes:
+  postgres-data:
+  ldap-data:
+  ldap-config:
+
+networks:
+  control-plane:
+    driver: bridge

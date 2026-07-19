@@ -244,8 +244,8 @@ def default_license_from_env() -> Dict[str, Any]:
         "license_key": os.getenv("ENTERPRISE_LICENSE_KEY", "internal-dev-license"),
         "license_type": os.getenv("ENTERPRISE_LICENSE_TYPE", "internal"),
         "expires_at": os.getenv("ENTERPRISE_LICENSE_EXPIRES_AT", "2099-12-31T23:59:59Z"),
-        "enabled_pipelines": _split_csv(os.getenv("ENTERPRISE_ENABLED_PIPELINES", "Build & Deploy Pipeline,Validation Pipeline,Release Promotion Pipeline")),
-        "enabled_features": _split_csv(os.getenv("ENTERPRISE_ENABLED_FEATURES", "build,artifact_publish,code_scan,image_scan,policy_validation,static_application_security,test_suites,notifications,secret_management,prod_deploy,ai_remediation")),
+        "enabled_pipelines": _split_csv(os.getenv("ENTERPRISE_ENABLED_PIPELINES", "Build & Deploy Pipeline,Validation Pipeline,Release Promotion Pipeline,Cloud Migration Factory")),
+        "enabled_features": _split_csv(os.getenv("ENTERPRISE_ENABLED_FEATURES", "build,artifact_publish,code_scan,image_scan,policy_validation,static_application_security,test_suites,notifications,secret_management,prod_deploy,ai_remediation,cloud_migration,cloud_migration_aws")),
         "allowed_environments": _split_csv(os.getenv("ENTERPRISE_ALLOWED_ENVIRONMENTS", "DEV,QA,STAGE,PROD,EKS-NONPROD,EKS-PROD")),
         "allowed_aws_account_ids": _split_csv(os.getenv("ENTERPRISE_ALLOWED_AWS_ACCOUNT_IDS", "")),
         "installation_id": os.getenv("ENTERPRISE_INSTALLATION_ID", ""),
@@ -328,6 +328,13 @@ PIPELINE_ALIASES = {
         "prod devops pipeline",
         "production release pipeline",
     },
+    "cloud migration factory": {
+        "cloud migration factory",
+        "cloud migration",
+        "cloud-migration",
+        "cloud_migration",
+        "aws migration factory",
+    },
 }
 
 
@@ -363,6 +370,8 @@ FEATURE_ALIASES = {
     },
     "test_suites": {"test_suites", "ui_testing", "api_regression", "performance_testing"},
     "ui_testing": {"ui_testing", "ui_end_to_end", "selenium", "test_suites"},
+    "cloud_migration": {"cloud_migration", "cloud-migration", "migration_factory"},
+    "cloud_migration_aws": {"cloud_migration_aws", "cloud-migration-aws", "aws_migration"},
 }
 
 

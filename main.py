@@ -24,6 +24,7 @@ from html import escape
 
 from database import SessionLocal, engine, Base
 from models import Application, ApplicationUserAccess, Vulnerability, EnvironmentCatalog
+from cloud_migration import build_cloud_migration_router
 from enterprise.licensing import (
     LicenseValidationError,
     default_license_from_env,
@@ -46,6 +47,8 @@ Base.metadata.create_all(bind=engine)
 
 def ensure_environment_catalog_schema() -> None:
     """Keep the lightweight SQLite catalog compatible with older installed releases."""
+    if engine.dialect.name != "sqlite":
+        return
     with engine.begin() as connection:
         columns = {
             row[1]
@@ -65,6 +68,8 @@ ensure_environment_catalog_schema()
 
 def ensure_vulnerability_schema() -> None:
     """Add optional enterprise finding metadata columns for existing client installs."""
+    if engine.dialect.name != "sqlite":
+        return
     with engine.begin() as connection:
         columns = {
             row[1]
@@ -392,8 +397,12 @@ pipeline {{
 """
 
 # GitHub webhook secret
-GITHUB_WEBHOOK_SECRET = os.environ["GITHUB_WEBHOOK_SECRET"]
-SESSION_SIGNING_SECRET = os.getenv("BACKEND_SESSION_SECRET", GITHUB_WEBHOOK_SECRET)
+GITHUB_WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "").strip()
+SESSION_SIGNING_SECRET = os.getenv("BACKEND_SESSION_SECRET", "").strip() or GITHUB_WEBHOOK_SECRET
+if RBAC_ENFORCEMENT_ENABLED and not SESSION_SIGNING_SECRET:
+    raise RuntimeError("BACKEND_SESSION_SECRET is required when backend RBAC enforcement is enabled.")
+if not SESSION_SIGNING_SECRET:
+    SESSION_SIGNING_SECRET = "rbac-disabled-local-session"
 
 def aws_account_id_from_registry(registry: Optional[str]) -> Optional[str]:
     if not registry:
@@ -439,6 +448,25 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+@app.get("/health/live", include_in_schema=False)
+def health_live():
+    return {"status": "live", "service": "horizon-platform-backend"}
+
+
+@app.get("/health/ready", include_in_schema=False)
+def health_ready():
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+        return {"status": "ready", "database": engine.dialect.name}
+    except Exception as exc:
+        logger.warning("Readiness database check failed: %s", exc)
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"status": "not_ready", "database": engine.dialect.name},
+        )
 
 class PipelineRequest(BaseModel):
     project_name: str
@@ -748,6 +776,10 @@ ROLE_DEVELOPER = "developer"
 ROLE_QA = "qa"
 ROLE_RELEASE_MANAGER = "release-manager"
 ROLE_VIEWER = "viewer"
+ROLE_MIGRATION_ARCHITECT = "migration-architect"
+ROLE_MIGRATION_OPERATOR = "migration-operator"
+ROLE_MIGRATION_APPROVER = "migration-approver"
+ROLE_MIGRATION_AUDITOR = "migration-auditor"
 
 CATALOG_ADMIN_ROLES = {ROLE_PLATFORM_ADMIN}
 PIPELINE_BUILD_ROLES = {ROLE_PLATFORM_ADMIN, ROLE_DEVELOPER}
@@ -761,6 +793,10 @@ ROLE_ENV_PERMISSIONS = {
     ROLE_QA: {"QA", "STAGE"},
     ROLE_RELEASE_MANAGER: {"QA", "STAGE", "PROD"},
     ROLE_VIEWER: set(),
+    ROLE_MIGRATION_ARCHITECT: {"DEV", "QA", "STAGE", "PROD"},
+    ROLE_MIGRATION_OPERATOR: {"DEV", "QA", "STAGE", "PROD"},
+    ROLE_MIGRATION_APPROVER: {"DEV", "QA", "STAGE", "PROD"},
+    ROLE_MIGRATION_AUDITOR: set(),
 }
 
 def normalize_role_name(role: str) -> str:
@@ -915,6 +951,9 @@ def require_roles(*allowed_roles: str):
         return principal
 
     return dependency
+
+
+app.include_router(build_cloud_migration_router(get_current_principal, get_db))
 
 def require_environment_permission(principal: AuthPrincipal, target_env: str, action: str) -> None:
     if not principal_can_use_environment(principal, target_env):
@@ -3259,6 +3298,8 @@ def upload_vulnerabilities(payload: UploadPayload, db: Session = Depends(get_db)
         return JSONResponse(status_code=500, content={"error": "Failed to upload vulnerabilities"})  
 
 def verify_github_signature(payload_body: bytes, signature_header: str) -> bool:
+    if not GITHUB_WEBHOOK_SECRET:
+        return False
     expected_signature = "sha256=" + hmac.new(
         GITHUB_WEBHOOK_SECRET.encode(), msg=payload_body, digestmod=hashlib.sha256
     ).hexdigest()
@@ -3271,6 +3312,8 @@ async def github_webhook(
     db: Session = Depends(get_db)
 ):
     try:
+        if not GITHUB_WEBHOOK_SECRET:
+            return JSONResponse(status_code=503, content={"error": "GitHub webhook integration is disabled"})
         body = await request.body()
 
         if not x_hub_signature_256:

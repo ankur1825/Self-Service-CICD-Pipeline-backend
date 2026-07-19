@@ -1,0 +1,52 @@
+# Overlay for an AWS-enabled client installation. Keep license documents,
+# database URLs, and cloud credentials in client-owned Kubernetes Secrets.
+cloudMigration:
+  enabled: true
+  dataBoundary: client-hosted
+  allowSelfApproval: false
+  aws:
+    enabled: true
+    executionEnabled: false
+    finalizationEnabled: false
+  worker:
+    # Turn on in read-only mode after PostgreSQL, IRSA, the target STS role,
+    # external ID, and source-network routing are configured.
+    enabled: false
+    serviceAccount:
+      annotations:
+        eks.amazonaws.com/role-arn: arn:aws:iam::111122223333:role/horizon-cloud-migration-worker
+    awsExternalIdSecret:
+      existingSecret: horizon-cloud-migration-aws-external-id
+      key: CLOUD_MIGRATION_AWS_EXTERNAL_ID
+
+database:
+  # PostgreSQL is required when the execution worker is enabled.
+  existingSecret: horizon-platform-database
+  key: DATABASE_URL
+
+enterprise:
+  licenseEnforcementEnabled: true
+  licenseMode: offline-file
+  licenseDocumentSecret:
+    existingSecret: horizon-cloud-migration-license
+    key: license.json
+    mountPath: /app/license/license.json
+  licenseSignatureVerificationRequired: true
+  publicKeySecret:
+    existingSecret: horizon-license-public-key
+    key: public-key.pem
+  # The signed license document—not editable Helm values—is authoritative for
+  # pipeline, feature, environment, account, and installation entitlements.
+
+ldap:
+  roleGroupMappings:
+    platform-admin:
+      - client-platform-admins
+    migration-architect:
+      - client-migration-architects
+    migration-operator:
+      - client-migration-operators
+    migration-approver:
+      - client-migration-approvers
+    migration-auditor:
+      - client-migration-auditors
