@@ -57,6 +57,15 @@ def ensure_environment_catalog_schema() -> None:
         additions = {
             "iam_validation_mode": "ALTER TABLE environment_catalog ADD COLUMN iam_validation_mode VARCHAR DEFAULT 'validation-only'",
             "eks_access_mode": "ALTER TABLE environment_catalog ADD COLUMN eks_access_mode VARCHAR DEFAULT 'namespace-scoped'",
+            "ecr_repository_strategy": "ALTER TABLE environment_catalog ADD COLUMN ecr_repository_strategy VARCHAR DEFAULT 'shared'",
+            "ecr_repository_provisioning_mode": "ALTER TABLE environment_catalog ADD COLUMN ecr_repository_provisioning_mode VARCHAR DEFAULT 'client-managed'",
+            "ecr_require_existing_repository": "ALTER TABLE environment_catalog ADD COLUMN ecr_require_existing_repository INTEGER DEFAULT 1",
+            "ecr_tag_mutability": "ALTER TABLE environment_catalog ADD COLUMN ecr_tag_mutability VARCHAR DEFAULT 'IMMUTABLE'",
+            "ecr_scan_on_push": "ALTER TABLE environment_catalog ADD COLUMN ecr_scan_on_push INTEGER DEFAULT 1",
+            "ecr_encryption_type": "ALTER TABLE environment_catalog ADD COLUMN ecr_encryption_type VARCHAR DEFAULT 'AES256'",
+            "ecr_kms_key_arn": "ALTER TABLE environment_catalog ADD COLUMN ecr_kms_key_arn VARCHAR",
+            "ecr_expire_untagged_after_days": "ALTER TABLE environment_catalog ADD COLUMN ecr_expire_untagged_after_days INTEGER DEFAULT 14",
+            "ecr_retain_release_images": "ALTER TABLE environment_catalog ADD COLUMN ecr_retain_release_images INTEGER DEFAULT 50",
         }
         for column, ddl in additions.items():
             if column not in columns:
@@ -492,7 +501,7 @@ class DevopsPipelineRequest(BaseModel):
     allowed_aws_account_ids: Optional[List[str]] = None
     installation_id: Optional[str] = None
     project_name: str
-    project_type: str
+    project_type: str = "Auto"
     repo_type: str
     repo_url: str
     branch: str = "main"
@@ -543,7 +552,7 @@ class TestDevopsPipelineRequest(BaseModel):
     allowed_aws_account_ids: Optional[List[str]] = None
     installation_id: Optional[str] = None
     project_name: str
-    project_type: str
+    project_type: str = "Auto"
     repo_type: str = "GitHub"
     repo_url: str
     branch: str = "main"
@@ -671,6 +680,15 @@ class EnvironmentCatalogEntryRequest(BaseModel):
     aws_region: Optional[str] = "us-east-1"
     ecr_registry: Optional[str] = None
     ecr_repository_template: Optional[str] = None
+    ecr_repository_strategy: Optional[str] = "shared"
+    ecr_repository_provisioning_mode: Optional[str] = "client-managed"
+    ecr_require_existing_repository: bool = True
+    ecr_tag_mutability: Optional[str] = "IMMUTABLE"
+    ecr_scan_on_push: bool = True
+    ecr_encryption_type: Optional[str] = "AES256"
+    ecr_kms_key_arn: Optional[str] = None
+    ecr_expire_untagged_after_days: int = 14
+    ecr_retain_release_images: int = 50
     artifact_bucket: Optional[str] = None
     client_aws_role_arn: Optional[str] = None
     nonprod_aws_role_arn: Optional[str] = None
@@ -1205,6 +1223,15 @@ def catalog_entry_to_dict(entry: EnvironmentCatalog) -> Dict[str, Any]:
         "aws_region": entry.aws_region or "us-east-1",
         "ecr_registry": entry.ecr_registry or "",
         "ecr_repository_template": entry.ecr_repository_template or "{project_name}",
+        "ecr_repository_strategy": entry.ecr_repository_strategy or "shared",
+        "ecr_repository_provisioning_mode": entry.ecr_repository_provisioning_mode or "client-managed",
+        "ecr_require_existing_repository": bool(entry.ecr_require_existing_repository),
+        "ecr_tag_mutability": entry.ecr_tag_mutability or "IMMUTABLE",
+        "ecr_scan_on_push": bool(entry.ecr_scan_on_push),
+        "ecr_encryption_type": entry.ecr_encryption_type or "AES256",
+        "ecr_kms_key_arn": entry.ecr_kms_key_arn or "",
+        "ecr_expire_untagged_after_days": 14 if entry.ecr_expire_untagged_after_days is None else entry.ecr_expire_untagged_after_days,
+        "ecr_retain_release_images": 50 if entry.ecr_retain_release_images is None else entry.ecr_retain_release_images,
         "artifact_bucket": entry.artifact_bucket or "",
         "client_aws_role_arn": entry.client_aws_role_arn or "",
         "nonprod_aws_role_arn": entry.nonprod_aws_role_arn or "",
@@ -1240,6 +1267,7 @@ def load_environment_catalog_seed() -> List[Dict[str, Any]]:
 def upsert_environment_catalog_entry(db: Session, raw: Dict[str, Any]) -> EnvironmentCatalog:
     env_name = normalize_environment_name(raw.get("name"))
     entry = db.query(EnvironmentCatalog).filter(EnvironmentCatalog.name == env_name).first()
+    is_new = entry is None
     if not entry:
         entry = EnvironmentCatalog(name=env_name)
         db.add(entry)
@@ -1250,6 +1278,15 @@ def upsert_environment_catalog_entry(db: Session, raw: Dict[str, Any]) -> Enviro
         "aws_region": ["awsRegion"],
         "ecr_registry": ["ecrRegistry"],
         "ecr_repository_template": ["ecrRepositoryTemplate"],
+        "ecr_repository_strategy": ["ecrRepositoryStrategy"],
+        "ecr_repository_provisioning_mode": ["ecrRepositoryProvisioningMode"],
+        "ecr_require_existing_repository": ["ecrRequireExistingRepository"],
+        "ecr_tag_mutability": ["ecrTagMutability"],
+        "ecr_scan_on_push": ["ecrScanOnPush"],
+        "ecr_encryption_type": ["ecrEncryptionType"],
+        "ecr_kms_key_arn": ["ecrKmsKeyArn"],
+        "ecr_expire_untagged_after_days": ["ecrExpireUntaggedAfterDays"],
+        "ecr_retain_release_images": ["ecrRetainReleaseImages"],
         "artifact_bucket": ["artifactBucket"],
         "client_aws_role_arn": ["clientAwsRoleArn"],
         "nonprod_aws_role_arn": ["nonprodAwsRoleArn"],
@@ -1264,7 +1301,9 @@ def upsert_environment_catalog_entry(db: Session, raw: Dict[str, Any]) -> Enviro
     }
     allowed_fields = [
         "display_name", "account_tier", "aws_account_id", "aws_region", "ecr_registry",
-        "ecr_repository_template", "artifact_bucket", "client_aws_role_arn", "nonprod_aws_role_arn",
+        "ecr_repository_template", "ecr_repository_strategy", "ecr_repository_provisioning_mode",
+        "ecr_tag_mutability", "ecr_encryption_type", "ecr_kms_key_arn",
+        "artifact_bucket", "client_aws_role_arn", "nonprod_aws_role_arn",
         "source_aws_role_arn", "target_aws_role_arn", "cluster_name", "namespace_strategy",
         "namespace_template", "iam_validation_mode", "eks_access_mode", "sns_topic_arn",
     ]
@@ -1277,6 +1316,22 @@ def upsert_environment_catalog_entry(db: Session, raw: Dict[str, Any]) -> Enviro
                     break
         if value is not None:
             setattr(entry, field, str(value).strip())
+    typed_fields = {}
+    typed_field_specs = {
+        "ecr_require_existing_repository": ("ecrRequireExistingRepository", True, lambda value: 1 if runner_bool_value(value) else 0),
+        "ecr_scan_on_push": ("ecrScanOnPush", True, lambda value: 1 if runner_bool_value(value) else 0),
+        "ecr_expire_untagged_after_days": ("ecrExpireUntaggedAfterDays", 14, int),
+        "ecr_retain_release_images": ("ecrRetainReleaseImages", 50, int),
+    }
+    for field, (alias, default, converter) in typed_field_specs.items():
+        raw_value = raw.get(field)
+        if raw_value is None:
+            raw_value = raw.get(alias)
+        if raw_value is None and not is_new:
+            continue
+        typed_fields[field] = converter(default if raw_value is None else raw_value)
+    for field, value in typed_fields.items():
+        setattr(entry, field, value)
     is_active_value = raw.get("is_active", raw.get("isActive", True))
     entry.is_active = 1 if is_active_value else 0
     entry.updated_at = datetime.utcnow()
@@ -1312,6 +1367,8 @@ def resolve_environment_catalog_values(db: Session, target_env: str, project_nam
     license_doc = merge_request_license(request_values)
     client_id = str(license_doc.get("client_id") or request_value("client_id") or "client").strip()
     repository_template = resolved("ecr_repository_template", "{project_name}")
+    repository_strategy = resolved("ecr_repository_strategy", "shared")
+    repository_provisioning_mode = resolved("ecr_repository_provisioning_mode", "client-managed")
     namespace_template = resolved("namespace_template", "{client_id}-{project_name}-{env}")
     namespace_strategy = resolved("namespace_strategy", request_value("namespace_strategy") or "auto")
     iam_validation_mode = resolved("iam_validation_mode", ENVIRONMENT_IAM_MODE)
@@ -1337,6 +1394,19 @@ def resolve_environment_catalog_values(db: Session, target_env: str, project_nam
         "AWS_ACCOUNT_ID": resolved("aws_account_id", aws_account_id_from_registry(ecr_registry) or ""),
         "ECR_REGISTRY": ecr_registry,
         "ECR_REPOSITORY": render_catalog_template(repository_template, project_name, client_id, env),
+        "ECR_REPOSITORY_STRATEGY": repository_strategy,
+        "ECR_REPOSITORY_PROVISIONING_MODE": repository_provisioning_mode,
+        "ECR_REQUIRE_EXISTING_REPOSITORY": bool(catalog.get("ecr_require_existing_repository", True)),
+        "ECR_TAG_MUTABILITY": resolved("ecr_tag_mutability", "IMMUTABLE").upper(),
+        "ECR_SCAN_ON_PUSH": bool(catalog.get("ecr_scan_on_push", True)),
+        "ECR_ENCRYPTION_TYPE": resolved("ecr_encryption_type", "AES256").upper(),
+        "ECR_KMS_KEY_ARN": resolved("ecr_kms_key_arn"),
+        "ECR_EXPIRE_UNTAGGED_AFTER_DAYS": int(
+            14 if catalog.get("ecr_expire_untagged_after_days") is None else catalog["ecr_expire_untagged_after_days"]
+        ),
+        "ECR_RETAIN_RELEASE_IMAGES": int(
+            50 if catalog.get("ecr_retain_release_images") is None else catalog["ecr_retain_release_images"]
+        ),
         "ARTIFACT_BUCKET": resolved("artifact_bucket"),
         "CLIENT_AWS_ROLE_ARN": client_role,
         "NONPROD_AWS_ROLE_ARN": nonprod_role,
@@ -1574,14 +1644,22 @@ def run_environment_preflight(
                 checks.append(preflight_check("Container registry access", "PASS", "Deployment role can read the target container repository."))
             except ClientError as exc:
                 code = exc.response.get("Error", {}).get("Code", "")
+                managed_repository = env_values.get("ECR_REPOSITORY_PROVISIONING_MODE") == "horizon-managed"
+                repository_can_be_created = code == "RepositoryNotFoundException" and managed_repository
                 checks.append(preflight_check(
                     "Container registry access",
-                    "WARN" if code == "RepositoryNotFoundException" else "FAIL",
-                    "ECR repository does not exist yet; the build pipeline must be allowed to create it."
+                    "WARN" if repository_can_be_created else "FAIL",
+                    "ECR repository does not exist yet; Horizon will create it on the first application build."
+                    if repository_can_be_created
+                    else f"Client-managed ECR repository '{ecr_repository}' does not exist."
                     if code == "RepositoryNotFoundException"
                     else f"Deployment role cannot access ECR repository '{ecr_repository}': {code or exc}",
-                    required=code != "RepositoryNotFoundException",
-                    remediation="Pre-create the ECR repository or grant the deployment role the required ECR permissions.",
+                    required=not repository_can_be_created,
+                    remediation=(
+                        "Grant the deployment role permission to create and configure repositories under the approved prefix."
+                        if managed_repository
+                        else "Pre-create the configured ECR repository and grant the deployment role push/pull access."
+                    ),
                 ))
 
         if cluster_name:
@@ -2276,6 +2354,7 @@ def create_devops_pipeline(
     principal: AuthPrincipal = Depends(require_roles(ROLE_PLATFORM_ADMIN, ROLE_DEVELOPER)),
 ):
     allowed_project_types = {
+        "Auto",
         "Docker",
         "Angular",
         "SpringBoot",
@@ -2370,6 +2449,15 @@ def create_devops_pipeline(
         "AWS_REGION": env_values["AWS_REGION"],
         "ECR_REGISTRY": env_values["ECR_REGISTRY"],
         "ECR_REPOSITORY": env_values["ECR_REPOSITORY"],
+        "ECR_REPOSITORY_STRATEGY": env_values["ECR_REPOSITORY_STRATEGY"],
+        "ECR_REPOSITORY_PROVISIONING_MODE": env_values["ECR_REPOSITORY_PROVISIONING_MODE"],
+        "ECR_REQUIRE_EXISTING_REPOSITORY": str(env_values["ECR_REQUIRE_EXISTING_REPOSITORY"]).lower(),
+        "ECR_TAG_MUTABILITY": env_values["ECR_TAG_MUTABILITY"],
+        "ECR_SCAN_ON_PUSH": str(env_values["ECR_SCAN_ON_PUSH"]).lower(),
+        "ECR_ENCRYPTION_TYPE": env_values["ECR_ENCRYPTION_TYPE"],
+        "ECR_KMS_KEY_ARN": env_values["ECR_KMS_KEY_ARN"],
+        "ECR_EXPIRE_UNTAGGED_AFTER_DAYS": str(env_values["ECR_EXPIRE_UNTAGGED_AFTER_DAYS"]),
+        "ECR_RETAIN_RELEASE_IMAGES": str(env_values["ECR_RETAIN_RELEASE_IMAGES"]),
         "ARTIFACT_BUCKET": env_values["ARTIFACT_BUCKET"],
         "CLIENT_AWS_ROLE_ARN": env_values["CLIENT_AWS_ROLE_ARN"],
         "NONPROD_AWS_ROLE_ARN": env_values["NONPROD_AWS_ROLE_ARN"],
@@ -2393,6 +2481,7 @@ def create_devops_pipeline(
         "ENABLE_SONARQUBE", "ENABLE_CHECKMARX", "ENABLE_SOAPUI", "ENABLE_JMETER",
         "ENABLE_SELENIUM", "ENABLE_NEWMAN", "ENABLE_RESTASSURED", "ENABLE_UFT",
         "ENABLE_TRIVY", "ENABLE_OPA", "ENABLE_NOTIFICATIONS",
+        "ECR_REQUIRE_EXISTING_REPOSITORY", "ECR_SCAN_ON_PUSH",
     ]
     job_config = build_runner_job_config(
         description=f"Build & Deploy Pipeline for {values['PROJECT_NAME']}",
@@ -2465,6 +2554,7 @@ def create_test_devops_pipeline(
     principal: AuthPrincipal = Depends(require_roles(ROLE_PLATFORM_ADMIN, ROLE_DEVELOPER, ROLE_QA, ROLE_RELEASE_MANAGER)),
 ):
     allowed_project_types = {
+        "Auto",
         "Docker",
         "Angular",
         "SpringBoot",
@@ -2773,6 +2863,15 @@ def create_prod_devops_pipeline(
         "SOURCE_ECR_REPOSITORY": (request.source_ecr_repository or source_env_values["ECR_REPOSITORY"]).strip(),
         "TARGET_ECR_REGISTRY": (request.target_ecr_registry or target_env_values["ECR_REGISTRY"]).strip(),
         "TARGET_ECR_REPOSITORY": (request.target_ecr_repository or target_env_values["ECR_REPOSITORY"]).strip(),
+        "TARGET_ECR_REPOSITORY_STRATEGY": target_env_values["ECR_REPOSITORY_STRATEGY"],
+        "TARGET_ECR_REPOSITORY_PROVISIONING_MODE": target_env_values["ECR_REPOSITORY_PROVISIONING_MODE"],
+        "TARGET_ECR_REQUIRE_EXISTING_REPOSITORY": str(target_env_values["ECR_REQUIRE_EXISTING_REPOSITORY"]).lower(),
+        "TARGET_ECR_TAG_MUTABILITY": target_env_values["ECR_TAG_MUTABILITY"],
+        "TARGET_ECR_SCAN_ON_PUSH": str(target_env_values["ECR_SCAN_ON_PUSH"]).lower(),
+        "TARGET_ECR_ENCRYPTION_TYPE": target_env_values["ECR_ENCRYPTION_TYPE"],
+        "TARGET_ECR_KMS_KEY_ARN": target_env_values["ECR_KMS_KEY_ARN"],
+        "TARGET_ECR_EXPIRE_UNTAGGED_AFTER_DAYS": str(target_env_values["ECR_EXPIRE_UNTAGGED_AFTER_DAYS"]),
+        "TARGET_ECR_RETAIN_RELEASE_IMAGES": str(target_env_values["ECR_RETAIN_RELEASE_IMAGES"]),
         "SOURCE_IMAGE_TAG": (request.source_image_tag or "").strip(),
         "TARGET_IMAGE_TAG": (request.target_image_tag or "").strip(),
         "CLIENT_AWS_ROLE_ARN": (request.client_aws_role_arn or target_env_values["CLIENT_AWS_ROLE_ARN"] or source_env_values["CLIENT_AWS_ROLE_ARN"]).strip(),
@@ -2799,7 +2898,13 @@ def create_prod_devops_pipeline(
         "ENABLE_NOTIFICATIONS": str(notification_requested).lower(),
         "SNS_TOPIC_ARN": target_env_values["SNS_TOPIC_ARN"] or source_env_values["SNS_TOPIC_ARN"] or (request.sns_topic_arn or "").strip(),
     }
-    bool_param_names = ["SECRET_ENABLED", "REQUIRE_APPROVAL", "ENABLE_NOTIFICATIONS"]
+    bool_param_names = [
+        "SECRET_ENABLED",
+        "REQUIRE_APPROVAL",
+        "ENABLE_NOTIFICATIONS",
+        "TARGET_ECR_REQUIRE_EXISTING_REPOSITORY",
+        "TARGET_ECR_SCAN_ON_PUSH",
+    ]
     job_config = build_runner_job_config(
         description=f"Release Promotion Pipeline for {values['PROJECT_NAME']}",
         values=values,
